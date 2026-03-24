@@ -1,0 +1,33 @@
+[storage]
+root = "storage"
+
+[factors]
+output_path = "research/factors/full_factor_panel_v3_run.parquet"
+start_date = "2024-01-02"
+end_date = "2026-03-10"
+
+[training]
+label_column = "excess_fwd_return_5"
+train_window_months = 12
+test_start_month = "2025-07"
+test_end_month = "2026-02"
+score_output_path = "research/models/walk_forward_scores_excess_v3_run.parquet"
+metric_output_path = "research/models/walk_forward_metrics_excess_v3_run.json"
+
+[analysis]
+layer_output_path = "research/models/walk_forward_layer_analysis_excess_v3_run.json"
+
+[model_backtest]
+output_dir = "results/model_score_backtest_walk_forward_excess_v3_run"
+start_date = "2025-07-01"
+end_date = "2026-02-28"
+top_k = 5
+rebalance_every = 3
+lookback_window = 20
+min_hold_bars = 5
+keep_buffer = 2
+min_turnover_names = 3
+initial_cash = 1000000
+commission_rate = 0.0003
+stamp_tax_rate = 0.001
+slippage_rate = 0.0005

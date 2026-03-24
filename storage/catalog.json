@@ -1,0 +1,36 @@
+{
+  "schema_version": "v1",
+  "source_type": "sqlite",
+  "source_path": "/Users/yongqiuwu/works/github/Hyper-Alpha-Arena/ashare-arena/backend/ashare_arena.db",
+  "imported_at": "2026-03-23T16:15:25",
+  "datasets": [
+    {
+      "name": "bars.daily",
+      "path": "storage/parquet/bars/daily.parquet",
+      "rows": 36295,
+      "min_date": "2024-01-02",
+      "max_date": "2026-03-10"
+    },
+    {
+      "name": "instruments.ashare",
+      "path": "storage/parquet/instruments/ashare_instruments.parquet",
+      "rows": 69,
+      "min_date": "1990-12-01",
+      "max_date": "2023-03-06"
+    },
+    {
+      "name": "calendar.ashare",
+      "path": "storage/parquet/calendar/ashare_trading_calendar.parquet",
+      "rows": 532,
+      "min_date": "2024-01-02",
+      "max_date": "2026-03-10"
+    },
+    {
+      "name": "universe.memberships",
+      "path": "storage/parquet/universe/memberships.parquet",
+      "rows": 0,
+      "min_date": null,
+      "max_date": null
+    }
+  ]
+}
