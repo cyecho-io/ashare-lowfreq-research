@@ -64,6 +64,21 @@ class WalkForwardConfig:
     min_data_in_leaf: int = 20
 
 
+@dataclass(frozen=True)
+class LatestInferenceConfig:
+    factor_panel_path: str
+    output_scores_path: str
+    output_metrics_path: str
+    label_column: str = "fwd_return_5"
+    inference_date: str | None = None
+    train_window_months: int = 12
+    feature_columns: tuple[str, ...] = tuple(DEFAULT_FEATURE_COLUMNS)
+    num_leaves: int = 31
+    learning_rate: float = 0.05
+    n_estimators: int = 200
+    min_data_in_leaf: int = 20
+
+
 def train_lightgbm_model(config: ModelTrainConfig) -> dict[str, float | int | str]:
     import lightgbm as lgb
 
@@ -120,6 +135,77 @@ def train_lightgbm_model(config: ModelTrainConfig) -> dict[str, float | int | st
         "train_end_date": config.train_end_date,
         "test_start_date": config.test_start_date,
         "test_end_date": config.test_end_date,
+    }
+
+    metrics_path = Path(config.output_metrics_path)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
+    return metrics
+
+
+def train_lightgbm_latest_inference(config: LatestInferenceConfig) -> dict[str, float | int | str]:
+    import lightgbm as lgb
+
+    frame = pd.read_parquet(config.factor_panel_path).sort_values(["trade_date", "symbol"]).copy()
+    if frame.empty:
+        raise ValueError("factor panel is empty")
+
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+    if config.inference_date is None:
+        inference_date = frame["trade_date"].max()
+    else:
+        inference_date = pd.Timestamp(config.inference_date)
+
+    inference_frame = frame.loc[frame["trade_date"] == inference_date].copy()
+    if inference_frame.empty:
+        raise ValueError("inference date produced an empty dataset")
+    inference_frame = inference_frame.dropna(subset=list(config.feature_columns)).copy()
+    if inference_frame.empty:
+        raise ValueError("inference rows have no valid feature values")
+
+    train_frame = frame.loc[frame["trade_date"] < inference_date].copy()
+    train_frame["month"] = train_frame["trade_date"].dt.to_period("M")
+    if config.train_window_months > 0:
+        train_months = sorted(train_frame["month"].dropna().unique().tolist())
+        train_months = train_months[-config.train_window_months :]
+        train_frame = train_frame.loc[train_frame["month"].isin(train_months)].copy()
+    train_frame = train_frame.dropna(subset=list(config.feature_columns) + [config.label_column]).copy()
+    if train_frame.empty:
+        raise ValueError("latest inference training set is empty")
+
+    model = lgb.LGBMRegressor(
+        objective="regression",
+        num_leaves=config.num_leaves,
+        learning_rate=config.learning_rate,
+        n_estimators=config.n_estimators,
+        min_data_in_leaf=config.min_data_in_leaf,
+        random_state=42,
+        verbose=-1,
+    )
+    model.fit(train_frame.loc[:, list(config.feature_columns)], train_frame[config.label_column])
+    predictions = model.predict(inference_frame.loc[:, list(config.feature_columns)])
+
+    scored = inference_frame.loc[:, ["trade_date", "symbol"]].copy()
+    if config.label_column in inference_frame.columns:
+        scored["label"] = inference_frame[config.label_column]
+    scored["prediction"] = predictions
+    scored["train_end_date"] = train_frame["trade_date"].max().date().isoformat()
+    scored["inference_date"] = inference_date.date().isoformat()
+
+    scores_path = Path(config.output_scores_path)
+    scores_path.parent.mkdir(parents=True, exist_ok=True)
+    scored.to_parquet(scores_path, index=False)
+
+    metrics = {
+        "label_column": config.label_column,
+        "feature_count": int(len(config.feature_columns)),
+        "train_window_months": config.train_window_months,
+        "train_rows": int(len(train_frame)),
+        "train_start_date": train_frame["trade_date"].min().date().isoformat(),
+        "train_end_date": train_frame["trade_date"].max().date().isoformat(),
+        "inference_date": inference_date.date().isoformat(),
+        "scored_rows": int(len(scored)),
+        "scored_symbol_count": int(scored["symbol"].nunique()),
     }
 
     metrics_path = Path(config.output_metrics_path)

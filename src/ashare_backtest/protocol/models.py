@@ -86,6 +86,8 @@ class BacktestConfig:
     stamp_tax_rate: float = 0.001
     slippage_rate: float = 0.0005
     rebalance_price: str = "open"
+    max_trade_participation_rate: float = 0.0
+    max_pending_days: int = 0
 
 
 @dataclass

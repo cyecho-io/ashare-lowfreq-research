@@ -12,6 +12,7 @@ dependencies = []
 
 [project.scripts]
 ashare-backtest = "ashare_backtest.cli.main:main"
+ashare-backtest-web = "ashare_backtest.web.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

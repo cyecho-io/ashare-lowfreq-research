@@ -27,6 +27,7 @@ class ScoreStrategyConfig:
     min_turnover_names: int = 2
     min_daily_amount: float = 0.0
     max_names_per_industry: int = 0
+    max_position_weight: float = 0.0
     exit_policy: str = "buffered_rank"
     grace_rank_buffer: int = 0
     grace_momentum_window: int = 3
@@ -140,13 +141,19 @@ class ScoreTopKStrategy(BaseStrategy):
         self._last_rebalance_date = context.trade_date
         current_symbols = set(context.positions)
         target_symbols = set(selected_symbols)
+        score_date = self._score_date(context)
         changed_names = len(current_symbols - target_symbols) + len(target_symbols - current_symbols)
-        if current_symbols and changed_names < self.config.min_turnover_names:
+        stale_symbols = {
+            symbol
+            for symbol in current_symbols
+            if not self._has_fresh_history(symbol, context, score_date)
+        }
+        if current_symbols and not stale_symbols and changed_names < self.config.min_turnover_names:
             retained = sorted(current_symbols)
             if retained:
                 weight = round(1 / len(retained), 6)
                 return AllocationDecision(
-                    target_weights={symbol: weight for symbol in retained},
+                    target_weights=self._apply_position_weight_cap({symbol: weight for symbol in retained}),
                     note="turnover_below_threshold_keep_current",
                 )
         target_weights = self._build_target_weights(context, selected_symbols)
@@ -170,6 +177,13 @@ class ScoreTopKStrategy(BaseStrategy):
         for symbol in active_symbols:
             next_hold_days[symbol] = self._hold_days.get(symbol, 0) + 1
         self._hold_days = next_hold_days
+
+    @staticmethod
+    def _has_fresh_history(symbol: str, context: StrategyContext, score_date: date | None) -> bool:
+        history = context.history(symbol)
+        if not history or score_date is None:
+            return False
+        return history[-1].trade_date == score_date
 
     def _liquidity_ok_symbols(self, context: StrategyContext) -> set[str]:
         if self.config.min_daily_amount <= 0:
@@ -341,10 +355,45 @@ class ScoreTopKStrategy(BaseStrategy):
 
         total_weight = sum(raw_weights.values())
         if total_weight <= 0:
-            return {symbol: round(base_weight, 6) for symbol in selected_symbols}
-        return {
+            return self._apply_position_weight_cap({symbol: round(base_weight, 6) for symbol in selected_symbols})
+        normalized = {
             symbol: round(weight / total_weight, 6)
             for symbol, weight in raw_weights.items()
+        }
+        return self._apply_position_weight_cap(normalized)
+
+    def _apply_position_weight_cap(self, target_weights: dict[str, float]) -> dict[str, float]:
+        positive = {symbol: float(weight) for symbol, weight in target_weights.items() if weight > 0}
+        if not positive:
+            return {}
+        if self.config.max_position_weight <= 0:
+            return positive
+
+        cap = min(max(self.config.max_position_weight, 0.0), 1.0)
+        working = dict(positive)
+        for _ in range(len(working) * 2):
+            over = {symbol: weight for symbol, weight in working.items() if weight > cap}
+            if not over:
+                break
+            excess = sum(weight - cap for weight in over.values())
+            for symbol in over:
+                working[symbol] = cap
+            under = {symbol: weight for symbol, weight in working.items() if weight < cap}
+            if excess <= 0 or not under:
+                break
+            under_total = sum(under.values())
+            if under_total <= 0:
+                break
+            for symbol, weight in under.items():
+                working[symbol] = weight + excess * (weight / under_total)
+
+        total = sum(working.values())
+        if total <= 0:
+            return {}
+        return {
+            symbol: round(weight / total, 6)
+            for symbol, weight in working.items()
+            if weight > 0
         }
 
     @staticmethod

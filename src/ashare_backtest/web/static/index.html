@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A-Share Backtest Console</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <nav class="topnav" aria-label="Global">
+        <a class="topnav-link active" href="/">回测控制台</a>
+        <a class="topnav-link" href="/paper">模拟交易策略台</a>
+      </nav>
+
+      <header class="hero">
+        <div>
+          <p class="eyebrow">A-Share Backtest Console</p>
+          <h1>策略回测控制台</h1>
+          <p class="subcopy">选策略、改区间、点一次开始回测，然后直接看结果和买卖明细。</p>
+        </div>
+        <div class="hero-meta">
+          <span class="pill">模型策略 UI</span>
+          <span class="pill">本地运行</span>
+          <span class="pill">无额外前端依赖</span>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel control-panel">
+          <div class="panel-head">
+            <h2>开始回测</h2>
+            <p>先从 `configs/*.toml` 里选一个策略配置。</p>
+          </div>
+          <form id="run-form" class="form-stack">
+            <label>
+              <span>策略配置</span>
+              <select id="strategy-select" name="config_path" required></select>
+            </label>
+            <label class="score-file-field">
+              <span>分数文件 Parquet</span>
+              <select id="score-file-select" name="scores_path" required></select>
+            </label>
+            <div class="form-row">
+              <label>
+                <span>开始日期</span>
+                <input id="start-date" name="start_date" type="date" required />
+              </label>
+              <label>
+                <span>结束日期</span>
+                <input id="end-date" name="end_date" type="date" required />
+              </label>
+            </div>
+            <div class="form-row">
+              <label>
+                <span>初始资金</span>
+                <input id="initial-cash" name="initial_cash" type="number" min="1000" step="1000" required />
+              </label>
+              <label>
+                <span>结果标签</span>
+                <input id="label" name="label" type="text" placeholder="可选，默认按策略名生成" />
+              </label>
+            </div>
+            <div class="preset-meta" id="preset-meta"></div>
+            <button id="run-button" class="primary-button" type="submit">开始回测</button>
+          </form>
+          <div id="job-status" class="job-status muted">等待提交任务。</div>
+        </section>
+
+        <section class="panel runs-panel">
+          <div class="panel-head">
+            <h2>结果目录</h2>
+            <p>可查看已有回测结果，也会显示刚跑完的新结果。</p>
+          </div>
+          <div id="runs-list" class="run-list"></div>
+        </section>
+
+        <section class="panel summary-panel">
+          <div class="panel-head">
+            <h2>结果摘要</h2>
+            <p id="result-title">先选择一份结果。</p>
+          </div>
+          <div id="summary-cards" class="summary-cards"></div>
+          <div class="chart-wrap">
+            <div class="chart-header">
+              <h3>权益曲线</h3>
+              <div class="chart-meta">
+                <span id="benchmark-label" class="muted"></span>
+                <span id="equity-points" class="muted"></span>
+              </div>
+            </div>
+            <svg id="equity-chart" viewBox="0 0 760 260" preserveAspectRatio="none" aria-label="equity chart"></svg>
+          </div>
+        </section>
+
+        <section class="panel trades-panel">
+          <div class="panel-head">
+            <h2>交易明细</h2>
+            <p>显示 `trades.csv` 的逐笔记录。</p>
+          </div>
+          <div class="trade-toolbar">
+            <input id="trade-filter" type="search" placeholder="按股票代码或 reason 过滤" />
+            <span id="trade-count" class="muted"></span>
+          </div>
+          <div class="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>代码</th>
+                  <th>方向</th>
+                  <th>数量</th>
+                  <th>价格</th>
+                  <th>金额</th>
+                  <th>状态</th>
+                  <th>原因</th>
+                </tr>
+              </thead>
+              <tbody id="trades-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

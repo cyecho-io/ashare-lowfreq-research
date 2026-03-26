@@ -1,20 +1,45 @@
 from __future__ import annotations
 
 import argparse
+import json
 from datetime import date
 from pathlib import Path
 
-from ashare_backtest.data import DEFAULT_SQLITE_SOURCE, ParquetDataProvider, SQLiteParquetImporter
+import pandas as pd
+
+from ashare_backtest.data import (
+    DEFAULT_BENCHMARK_OUTPUT,
+    DEFAULT_BENCHMARK_SYMBOL,
+    DEFAULT_SQLITE_SOURCE,
+    ParquetDataProvider,
+    SQLiteParquetImporter,
+    TushareBenchmarkSync,
+    TushareClient,
+    TushareSQLiteSync,
+    resolve_tushare_token,
+)
 from ashare_backtest.factors import FactorBuildConfig, FactorBuilder
 from ashare_backtest.research import (
+    CapacityAnalysisConfig,
     LayeredAnalysisConfig,
+    LatestInferenceConfig,
     ModelTrainConfig,
+    MonthlyComparisonConfig,
+    PremarketReferenceConfig,
+    RiskExposureConfig,
     ScoreStrategyConfig,
     ScoreTopKStrategy,
+    StrategyStateConfig,
     SweepConfig,
     WalkForwardConfig,
+    generate_premarket_reference,
+    generate_strategy_state,
     analyze_score_layers,
+    analyze_trade_capacity,
+    analyze_monthly_risk_exposures,
+    compare_backtest_monthly_returns,
     run_model_sweep,
+    train_lightgbm_latest_inference,
     train_lightgbm_model,
     train_lightgbm_walk_forward,
 )
@@ -56,6 +81,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory where standardized Parquet data is stored",
     )
 
+    sync_tushare_parser = subparsers.add_parser(
+        "sync-tushare-sqlite",
+        help="Sync Tushare daily data into the source SQLite database",
+    )
+    sync_tushare_parser.add_argument(
+        "--sqlite-path",
+        default=DEFAULT_SQLITE_SOURCE,
+        help="Path to the source SQLite database",
+    )
+    sync_tushare_parser.add_argument("--start", default=None, help="Sync start date, YYYYMMDD")
+    sync_tushare_parser.add_argument("--end", default=None, help="Sync end date, YYYYMMDD")
+    sync_tushare_parser.add_argument("--token", default=None, help="Tushare token, defaults to TUSHARE_TOKEN env var")
+
+    benchmark_parser = subparsers.add_parser(
+        "sync-tushare-benchmark",
+        help="Sync benchmark index daily data from Tushare into project parquet storage",
+    )
+    benchmark_parser.add_argument("--symbol", default=DEFAULT_BENCHMARK_SYMBOL, help="Benchmark ts_code, e.g. 000300.SH")
+    benchmark_parser.add_argument("--start", default=None, help="Sync start date, YYYYMMDD")
+    benchmark_parser.add_argument("--end", default=None, help="Sync end date, YYYYMMDD")
+    benchmark_parser.add_argument("--output-path", default=DEFAULT_BENCHMARK_OUTPUT)
+    benchmark_parser.add_argument("--token", default=None, help="Tushare token, defaults to TUSHARE_TOKEN env var")
+
+    universe_parser = subparsers.add_parser("list-universes", help="List available universe memberships")
+    universe_parser.add_argument("--storage-root", default="storage", help="Parquet storage root")
+
     run_parser = subparsers.add_parser("run-backtest", help="Run a backtest on imported Parquet data")
     run_parser.add_argument("strategy_path", help="Path to the strategy script")
     run_parser.add_argument("--storage-root", default="storage", help="Parquet storage root")
@@ -70,6 +121,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--commission-rate", type=float, default=0.0003)
     run_parser.add_argument("--stamp-tax-rate", type=float, default=0.001)
     run_parser.add_argument("--slippage-rate", type=float, default=0.0005)
+    run_parser.add_argument("--max-trade-participation-rate", type=float, default=0.0)
+    run_parser.add_argument("--max-pending-days", type=int, default=0)
     run_parser.add_argument("--output-dir", default="results/latest")
 
     run_config_parser = subparsers.add_parser("run-config", help="Run a backtest from a TOML config file")
@@ -79,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     factor_parser.add_argument("--storage-root", default="storage", help="Parquet storage root")
     factor_parser.add_argument("--output-path", default="research/factors/basic_factor_panel.parquet")
     factor_parser.add_argument("--symbols", default="", help="Optional comma-separated symbols")
+    factor_parser.add_argument("--universe-name", default="", help="Optional universe membership name")
     factor_parser.add_argument("--start-date", default=None, help="Optional start date, YYYY-MM-DD")
     factor_parser.add_argument("--end-date", default=None, help="Optional end date, YYYY-MM-DD")
 
@@ -111,6 +165,21 @@ def build_parser() -> argparse.ArgumentParser:
     wf_parser.add_argument("--output-scores-path", default="research/models/walk_forward_scores.parquet")
     wf_parser.add_argument("--output-metrics-path", default="research/models/walk_forward_metrics.json")
 
+    latest_parser = subparsers.add_parser(
+        "train-lgbm-latest-inference",
+        help="Train on labeled history and score the latest unlabeled trade date",
+    )
+    latest_parser.add_argument(
+        "--factor-panel-path",
+        default="research/factors/full_factor_panel_v2.parquet",
+        help="Input factor panel parquet path",
+    )
+    latest_parser.add_argument("--label-column", default="fwd_return_5")
+    latest_parser.add_argument("--inference-date", default=None)
+    latest_parser.add_argument("--train-window-months", type=int, default=12)
+    latest_parser.add_argument("--output-scores-path", default="research/models/latest_scores.parquet")
+    latest_parser.add_argument("--output-metrics-path", default="research/models/latest_metrics.json")
+
     score_bt_parser = subparsers.add_parser(
         "run-model-backtest",
         help="Run a backtest driven by model score parquet output",
@@ -127,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     score_bt_parser.add_argument("--min-turnover-names", type=int, default=2)
     score_bt_parser.add_argument("--min-daily-amount", type=float, default=0.0)
     score_bt_parser.add_argument("--max-names-per-industry", type=int, default=0)
+    score_bt_parser.add_argument("--max-position-weight", type=float, default=0.0)
     score_bt_parser.add_argument("--exit-policy", default="buffered_rank")
     score_bt_parser.add_argument("--grace-rank-buffer", type=int, default=0)
     score_bt_parser.add_argument("--grace-momentum-window", type=int, default=3)
@@ -148,6 +218,8 @@ def build_parser() -> argparse.ArgumentParser:
     score_bt_parser.add_argument("--commission-rate", type=float, default=0.0003)
     score_bt_parser.add_argument("--stamp-tax-rate", type=float, default=0.001)
     score_bt_parser.add_argument("--slippage-rate", type=float, default=0.0005)
+    score_bt_parser.add_argument("--max-trade-participation-rate", type=float, default=0.0)
+    score_bt_parser.add_argument("--max-pending-days", type=int, default=0)
     score_bt_parser.add_argument("--output-dir", default="results/model_score_backtest")
 
     layer_parser = subparsers.add_parser(
@@ -157,6 +229,120 @@ def build_parser() -> argparse.ArgumentParser:
     layer_parser.add_argument("--scores-path", required=True)
     layer_parser.add_argument("--output-path", default="research/models/layer_analysis.json")
     layer_parser.add_argument("--bins", type=int, default=5)
+
+    capacity_parser = subparsers.add_parser(
+        "analyze-trade-capacity",
+        help="Estimate trade participation and capacity degradation from exported trades",
+    )
+    capacity_parser.add_argument("--trades-path", required=True)
+    capacity_parser.add_argument("--storage-root", default="storage")
+    capacity_parser.add_argument("--output-path", default="research/models/capacity_analysis.json")
+    capacity_parser.add_argument("--base-capital", type=float, default=1_000_000.0)
+    capacity_parser.add_argument("--scale-capitals", default="100000,300000,500000,1000000,3000000,5000000")
+    capacity_parser.add_argument("--participation-thresholds", default="0.01,0.02,0.05,0.10")
+    capacity_parser.add_argument("--top-trade-count", type=int, default=20)
+
+    monthly_parser = subparsers.add_parser(
+        "compare-backtest-monthly",
+        help="Compare monthly returns across multiple backtest result directories",
+    )
+    monthly_parser.add_argument("--result-dirs", required=True, help="Comma-separated result directories")
+    monthly_parser.add_argument("--labels", required=True, help="Comma-separated labels matching result directories")
+    monthly_parser.add_argument("--output-path", default="research/models/backtest_monthly_comparison.json")
+
+    risk_parser = subparsers.add_parser(
+        "analyze-risk-exposures",
+        help="Analyze monthly risk exposures from backtest trades and market data",
+    )
+    risk_parser.add_argument("--result-dir", required=True)
+    risk_parser.add_argument("--storage-root", default="storage")
+    risk_parser.add_argument("--output-path", default="research/models/risk_exposures.json")
+    risk_parser.add_argument("--top-industries", type=int, default=5)
+    risk_parser.add_argument("--volatility-window", type=int, default=20)
+
+    premarket_parser = subparsers.add_parser(
+        "generate-premarket-reference",
+        help="Generate a premarket buy/sell/hold reference from the model strategy",
+    )
+    premarket_parser.add_argument("--scores-path", default="research/models/latest_scores.parquet")
+    premarket_parser.add_argument("--storage-root", default="storage")
+    premarket_parser.add_argument("--trade-date", required=True)
+    premarket_parser.add_argument("--top-k", type=int, default=5)
+    premarket_parser.add_argument("--rebalance-every", type=int, default=3)
+    premarket_parser.add_argument("--lookback-window", type=int, default=20)
+    premarket_parser.add_argument("--min-hold-bars", type=int, default=5)
+    premarket_parser.add_argument("--keep-buffer", type=int, default=2)
+    premarket_parser.add_argument("--min-turnover-names", type=int, default=2)
+    premarket_parser.add_argument("--min-daily-amount", type=float, default=0.0)
+    premarket_parser.add_argument("--max-names-per-industry", type=int, default=0)
+    premarket_parser.add_argument("--max-position-weight", type=float, default=0.0)
+    premarket_parser.add_argument("--exit-policy", default="buffered_rank")
+    premarket_parser.add_argument("--grace-rank-buffer", type=int, default=0)
+    premarket_parser.add_argument("--grace-momentum-window", type=int, default=3)
+    premarket_parser.add_argument("--grace-min-return", type=float, default=0.0)
+    premarket_parser.add_argument("--trailing-stop-window", type=int, default=10)
+    premarket_parser.add_argument("--trailing-stop-drawdown", type=float, default=0.12)
+    premarket_parser.add_argument("--trailing-stop-min-gain", type=float, default=0.15)
+    premarket_parser.add_argument("--score-reversal-confirm-days", type=int, default=3)
+    premarket_parser.add_argument("--score-reversal-threshold", type=float, default=0.0)
+    premarket_parser.add_argument("--hybrid-price-window", type=int, default=5)
+    premarket_parser.add_argument("--hybrid-price-threshold", type=float, default=0.0)
+    premarket_parser.add_argument("--strong-keep-extra-buffer", type=int, default=0)
+    premarket_parser.add_argument("--strong-keep-momentum-window", type=int, default=5)
+    premarket_parser.add_argument("--strong-keep-min-return", type=float, default=0.0)
+    premarket_parser.add_argument("--strong-trim-slowdown", type=float, default=0.0)
+    premarket_parser.add_argument("--strong-trim-momentum-window", type=int, default=5)
+    premarket_parser.add_argument("--strong-trim-min-return", type=float, default=0.0)
+    premarket_parser.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    premarket_parser.add_argument("--commission-rate", type=float, default=0.0003)
+    premarket_parser.add_argument("--stamp-tax-rate", type=float, default=0.001)
+    premarket_parser.add_argument("--slippage-rate", type=float, default=0.0005)
+    premarket_parser.add_argument("--max-trade-participation-rate", type=float, default=0.0)
+    premarket_parser.add_argument("--max-pending-days", type=int, default=0)
+    premarket_parser.add_argument("--output-path", default="research/models/premarket_reference.json")
+
+    state_parser = subparsers.add_parser(
+        "generate-strategy-state",
+        help="Generate a reusable strategy state file for initial build or continued execution",
+    )
+    state_parser.add_argument("--scores-path", default="research/models/latest_scores.parquet")
+    state_parser.add_argument("--storage-root", default="storage")
+    state_parser.add_argument("--trade-date", required=True)
+    state_parser.add_argument("--mode", choices=("initial_entry", "continue", "historical"), default="continue")
+    state_parser.add_argument("--previous-state-path", default="")
+    state_parser.add_argument("--top-k", type=int, default=5)
+    state_parser.add_argument("--rebalance-every", type=int, default=3)
+    state_parser.add_argument("--lookback-window", type=int, default=20)
+    state_parser.add_argument("--min-hold-bars", type=int, default=5)
+    state_parser.add_argument("--keep-buffer", type=int, default=2)
+    state_parser.add_argument("--min-turnover-names", type=int, default=2)
+    state_parser.add_argument("--min-daily-amount", type=float, default=0.0)
+    state_parser.add_argument("--max-names-per-industry", type=int, default=0)
+    state_parser.add_argument("--max-position-weight", type=float, default=0.0)
+    state_parser.add_argument("--exit-policy", default="buffered_rank")
+    state_parser.add_argument("--grace-rank-buffer", type=int, default=0)
+    state_parser.add_argument("--grace-momentum-window", type=int, default=3)
+    state_parser.add_argument("--grace-min-return", type=float, default=0.0)
+    state_parser.add_argument("--trailing-stop-window", type=int, default=10)
+    state_parser.add_argument("--trailing-stop-drawdown", type=float, default=0.12)
+    state_parser.add_argument("--trailing-stop-min-gain", type=float, default=0.15)
+    state_parser.add_argument("--score-reversal-confirm-days", type=int, default=3)
+    state_parser.add_argument("--score-reversal-threshold", type=float, default=0.0)
+    state_parser.add_argument("--hybrid-price-window", type=int, default=5)
+    state_parser.add_argument("--hybrid-price-threshold", type=float, default=0.0)
+    state_parser.add_argument("--strong-keep-extra-buffer", type=int, default=0)
+    state_parser.add_argument("--strong-keep-momentum-window", type=int, default=5)
+    state_parser.add_argument("--strong-keep-min-return", type=float, default=0.0)
+    state_parser.add_argument("--strong-trim-slowdown", type=float, default=0.0)
+    state_parser.add_argument("--strong-trim-momentum-window", type=int, default=5)
+    state_parser.add_argument("--strong-trim-min-return", type=float, default=0.0)
+    state_parser.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    state_parser.add_argument("--commission-rate", type=float, default=0.0003)
+    state_parser.add_argument("--stamp-tax-rate", type=float, default=0.001)
+    state_parser.add_argument("--slippage-rate", type=float, default=0.0005)
+    state_parser.add_argument("--max-trade-participation-rate", type=float, default=0.0)
+    state_parser.add_argument("--max-pending-days", type=int, default=0)
+    state_parser.add_argument("--output-path", default="research/models/strategy_state.json")
 
     pipeline_parser = subparsers.add_parser(
         "run-research-config",
@@ -214,6 +400,36 @@ def main() -> None:
                 )
             return
 
+        if args.command == "sync-tushare-sqlite":
+            token = resolve_tushare_token(args.token)
+            if not token:
+                raise SystemExit("Missing Tushare token. Pass --token or set TUSHARE_TOKEN.")
+            summary = TushareSQLiteSync(
+                sqlite_path=args.sqlite_path,
+                client=TushareClient(token),
+            ).sync(start_date=args.start, end_date=args.end)
+            print(json.dumps(summary.__dict__, ensure_ascii=False, indent=2))
+            return
+
+        if args.command == "sync-tushare-benchmark":
+            token = resolve_tushare_token(args.token)
+            if not token:
+                raise SystemExit("Missing Tushare token. Pass --token or set TUSHARE_TOKEN.")
+            summary = TushareBenchmarkSync(
+                client=TushareClient(token),
+            ).sync(
+                symbol=args.symbol,
+                start_date=args.start,
+                end_date=args.end,
+                output_path=args.output_path,
+            )
+            print(json.dumps(summary.__dict__, ensure_ascii=False, indent=2))
+            return
+
+        if args.command == "list-universes":
+            list_universes(args.storage_root)
+            return
+
         if args.command == "run-backtest":
             run_backtest(
                 backtest=BacktestConfig(
@@ -225,6 +441,8 @@ def main() -> None:
                     commission_rate=args.commission_rate,
                     stamp_tax_rate=args.stamp_tax_rate,
                     slippage_rate=args.slippage_rate,
+                    max_trade_participation_rate=args.max_trade_participation_rate,
+                    max_pending_days=args.max_pending_days,
                 ),
                 storage_root=args.storage_root,
                 output_dir=args.output_dir,
@@ -247,6 +465,7 @@ def main() -> None:
                     storage_root=args.storage_root,
                     output_path=args.output_path,
                     symbols=symbols,
+                    universe_name=args.universe_name,
                     start_date=args.start_date,
                     end_date=args.end_date,
                 )
@@ -302,6 +521,26 @@ def main() -> None:
             )
             return
 
+        if args.command == "train-lgbm-latest-inference":
+            metrics = train_lightgbm_latest_inference(
+                LatestInferenceConfig(
+                    factor_panel_path=args.factor_panel_path,
+                    output_scores_path=args.output_scores_path,
+                    output_metrics_path=args.output_metrics_path,
+                    label_column=args.label_column,
+                    inference_date=args.inference_date,
+                    train_window_months=args.train_window_months,
+                )
+            )
+            print(
+                "LATEST_INFERENCE "
+                f"inference_date={metrics['inference_date']} "
+                f"train_rows={metrics['train_rows']} "
+                f"scored_rows={metrics['scored_rows']} "
+                f"scores={args.output_scores_path}"
+            )
+            return
+
         if args.command == "run-model-backtest":
             run_model_backtest(
                 scores_path=args.scores_path,
@@ -316,6 +555,7 @@ def main() -> None:
                 min_turnover_names=args.min_turnover_names,
                 min_daily_amount=args.min_daily_amount,
                 max_names_per_industry=args.max_names_per_industry,
+                max_position_weight=args.max_position_weight,
                 exit_policy=args.exit_policy,
                 grace_rank_buffer=args.grace_rank_buffer,
                 grace_momentum_window=args.grace_momentum_window,
@@ -337,6 +577,8 @@ def main() -> None:
                 commission_rate=args.commission_rate,
                 stamp_tax_rate=args.stamp_tax_rate,
                 slippage_rate=args.slippage_rate,
+                max_trade_participation_rate=args.max_trade_participation_rate,
+                max_pending_days=args.max_pending_days,
                 output_dir=args.output_dir,
             )
             return
@@ -354,6 +596,166 @@ def main() -> None:
                 "LAYER_ANALYSIS "
                 f"spread={summary['mean_top_bottom_spread']:.6f} "
                 f"positive_ratio={summary['positive_spread_ratio']:.4f} "
+                f"output={args.output_path}"
+            )
+            return
+
+        if args.command == "analyze-trade-capacity":
+            payload = analyze_trade_capacity(
+                CapacityAnalysisConfig(
+                    trades_path=args.trades_path,
+                    storage_root=args.storage_root,
+                    output_path=args.output_path,
+                    base_capital=args.base_capital,
+                    scale_capitals=tuple(float(item) for item in args.scale_capitals.split(",") if item),
+                    participation_thresholds=tuple(
+                        float(item) for item in args.participation_thresholds.split(",") if item
+                    ),
+                    top_trade_count=args.top_trade_count,
+                )
+            )
+            first_scale = payload["by_scale"][0]
+            print(
+                "CAPACITY_ANALYSIS "
+                f"scales={len(payload['by_scale'])} "
+                f"base_capital={payload['summary']['base_capital']:.0f} "
+                f"first_scale_max_participation={first_scale['participation_max']:.4f} "
+                f"output={args.output_path}"
+            )
+            return
+
+        if args.command == "compare-backtest-monthly":
+            payload = compare_backtest_monthly_returns(
+                MonthlyComparisonConfig(
+                    result_dirs=tuple(item for item in args.result_dirs.split(",") if item),
+                    labels=tuple(item for item in args.labels.split(",") if item),
+                    output_path=args.output_path,
+                )
+            )
+            print(
+                "MONTHLY_COMPARISON "
+                f"labels={len(payload['summary']['labels'])} "
+                f"months={len(payload['by_month'])} "
+                f"output={args.output_path}"
+            )
+            return
+
+        if args.command == "analyze-risk-exposures":
+            payload = analyze_monthly_risk_exposures(
+                RiskExposureConfig(
+                    result_dir=args.result_dir,
+                    storage_root=args.storage_root,
+                    output_path=args.output_path,
+                    top_industries=args.top_industries,
+                    volatility_window=args.volatility_window,
+                )
+            )
+            print(
+                "RISK_EXPOSURES "
+                f"months={len(payload['by_month'])} "
+                f"output={args.output_path}"
+            )
+            return
+
+        if args.command == "generate-premarket-reference":
+            payload = generate_premarket_reference(
+                PremarketReferenceConfig(
+                    scores_path=args.scores_path,
+                    storage_root=args.storage_root,
+                    output_path=args.output_path,
+                    trade_date=args.trade_date,
+                    top_k=args.top_k,
+                    rebalance_every=args.rebalance_every,
+                    lookback_window=args.lookback_window,
+                    min_hold_bars=args.min_hold_bars,
+                    keep_buffer=args.keep_buffer,
+                    min_turnover_names=args.min_turnover_names,
+                    min_daily_amount=args.min_daily_amount,
+                    max_names_per_industry=args.max_names_per_industry,
+                    max_position_weight=args.max_position_weight,
+                    exit_policy=args.exit_policy,
+                    grace_rank_buffer=args.grace_rank_buffer,
+                    grace_momentum_window=args.grace_momentum_window,
+                    grace_min_return=args.grace_min_return,
+                    trailing_stop_window=args.trailing_stop_window,
+                    trailing_stop_drawdown=args.trailing_stop_drawdown,
+                    trailing_stop_min_gain=args.trailing_stop_min_gain,
+                    score_reversal_confirm_days=args.score_reversal_confirm_days,
+                    score_reversal_threshold=args.score_reversal_threshold,
+                    hybrid_price_window=args.hybrid_price_window,
+                    hybrid_price_threshold=args.hybrid_price_threshold,
+                    strong_keep_extra_buffer=args.strong_keep_extra_buffer,
+                    strong_keep_momentum_window=args.strong_keep_momentum_window,
+                    strong_keep_min_return=args.strong_keep_min_return,
+                    strong_trim_slowdown=args.strong_trim_slowdown,
+                    strong_trim_momentum_window=args.strong_trim_momentum_window,
+                    strong_trim_min_return=args.strong_trim_min_return,
+                    initial_cash=args.initial_cash,
+                    commission_rate=args.commission_rate,
+                    stamp_tax_rate=args.stamp_tax_rate,
+                    slippage_rate=args.slippage_rate,
+                    max_trade_participation_rate=args.max_trade_participation_rate,
+                    max_pending_days=args.max_pending_days,
+                )
+            )
+            print(
+                "PREMARKET_REFERENCE "
+                f"signal_date={payload['summary']['signal_date']} "
+                f"execution_date={payload['summary']['execution_date']} "
+                f"actions={len(payload['actions'])} "
+                f"output={args.output_path}"
+            )
+            return
+
+        if args.command == "generate-strategy-state":
+            payload = generate_strategy_state(
+                StrategyStateConfig(
+                    scores_path=args.scores_path,
+                    storage_root=args.storage_root,
+                    output_path=args.output_path,
+                    trade_date=args.trade_date,
+                    mode=args.mode,
+                    previous_state_path=args.previous_state_path,
+                    top_k=args.top_k,
+                    rebalance_every=args.rebalance_every,
+                    lookback_window=args.lookback_window,
+                    min_hold_bars=args.min_hold_bars,
+                    keep_buffer=args.keep_buffer,
+                    min_turnover_names=args.min_turnover_names,
+                    min_daily_amount=args.min_daily_amount,
+                    max_names_per_industry=args.max_names_per_industry,
+                    max_position_weight=args.max_position_weight,
+                    exit_policy=args.exit_policy,
+                    grace_rank_buffer=args.grace_rank_buffer,
+                    grace_momentum_window=args.grace_momentum_window,
+                    grace_min_return=args.grace_min_return,
+                    trailing_stop_window=args.trailing_stop_window,
+                    trailing_stop_drawdown=args.trailing_stop_drawdown,
+                    trailing_stop_min_gain=args.trailing_stop_min_gain,
+                    score_reversal_confirm_days=args.score_reversal_confirm_days,
+                    score_reversal_threshold=args.score_reversal_threshold,
+                    hybrid_price_window=args.hybrid_price_window,
+                    hybrid_price_threshold=args.hybrid_price_threshold,
+                    strong_keep_extra_buffer=args.strong_keep_extra_buffer,
+                    strong_keep_momentum_window=args.strong_keep_momentum_window,
+                    strong_keep_min_return=args.strong_keep_min_return,
+                    strong_trim_slowdown=args.strong_trim_slowdown,
+                    strong_trim_momentum_window=args.strong_trim_momentum_window,
+                    strong_trim_min_return=args.strong_trim_min_return,
+                    initial_cash=args.initial_cash,
+                    commission_rate=args.commission_rate,
+                    stamp_tax_rate=args.stamp_tax_rate,
+                    slippage_rate=args.slippage_rate,
+                    max_trade_participation_rate=args.max_trade_participation_rate,
+                    max_pending_days=args.max_pending_days,
+                )
+            )
+            print(
+                "STRATEGY_STATE "
+                f"signal_date={payload['summary']['signal_date']} "
+                f"execution_date={payload['summary']['execution_date']} "
+                f"mode={payload['summary']['state_mode']} "
+                f"positions={len(payload['next_state']['positions'])} "
                 f"output={args.output_path}"
             )
             return
@@ -425,6 +827,41 @@ def run_backtest(backtest: BacktestConfig, storage_root: str, output_dir: str) -
     )
 
 
+def list_universes(storage_root: str) -> None:
+    memberships_path = Path(storage_root) / "parquet" / "universe" / "memberships.parquet"
+    frame = pd.read_parquet(
+        memberships_path,
+        columns=["universe_name", "symbol", "effective_date", "expiry_date"],
+    )
+    if frame.empty:
+        print(f"NO_UNIVERSES storage={storage_root}")
+        return
+
+    for column in ("effective_date", "expiry_date"):
+        frame[column] = pd.to_datetime(frame[column], errors="coerce")
+
+    summary = (
+        frame.groupby("universe_name", dropna=False)
+        .agg(
+            symbol_count=("symbol", "nunique"),
+            effective_from=("effective_date", "min"),
+            effective_to=("expiry_date", "max"),
+        )
+        .reset_index()
+        .sort_values("universe_name")
+    )
+    for _, row in summary.iterrows():
+        start = row["effective_from"].date().isoformat() if pd.notna(row["effective_from"]) else "-"
+        end = row["effective_to"].date().isoformat() if pd.notna(row["effective_to"]) else "-"
+        print(
+            "UNIVERSE "
+            f"name={row['universe_name']} "
+            f"symbols={int(row['symbol_count'])} "
+            f"effective_from={start} "
+            f"effective_to={end}"
+        )
+
+
 def run_model_backtest(
     scores_path: str,
     storage_root: str,
@@ -438,6 +875,7 @@ def run_model_backtest(
     min_turnover_names: int,
     min_daily_amount: float,
     max_names_per_industry: int,
+    max_position_weight: float,
     exit_policy: str,
     grace_rank_buffer: int,
     grace_momentum_window: int,
@@ -459,6 +897,8 @@ def run_model_backtest(
     commission_rate: float,
     stamp_tax_rate: float,
     slippage_rate: float,
+    max_trade_participation_rate: float,
+    max_pending_days: int,
     output_dir: str,
 ) -> None:
     import pandas as pd
@@ -478,6 +918,7 @@ def run_model_backtest(
             min_turnover_names=min_turnover_names,
             min_daily_amount=min_daily_amount,
             max_names_per_industry=max_names_per_industry,
+            max_position_weight=max_position_weight,
             exit_policy=exit_policy,
             grace_rank_buffer=grace_rank_buffer,
             grace_momentum_window=grace_momentum_window,
@@ -506,6 +947,8 @@ def run_model_backtest(
         commission_rate=commission_rate,
         stamp_tax_rate=stamp_tax_rate,
         slippage_rate=slippage_rate,
+        max_trade_participation_rate=max_trade_participation_rate,
+        max_pending_days=max_pending_days,
     )
     provider.preload(
         symbols=backtest.universe,
@@ -534,6 +977,7 @@ def run_research_pipeline(config_path: str) -> None:
         FactorBuildConfig(
             storage_root=config.storage_root,
             output_path=config.factor_output_path,
+            universe_name=config.factor_universe_name,
             start_date=config.factor_start_date,
             end_date=config.factor_end_date,
         )
@@ -572,6 +1016,7 @@ def run_research_pipeline(config_path: str) -> None:
         min_turnover_names=config.min_turnover_names,
         min_daily_amount=config.min_daily_amount,
         max_names_per_industry=config.max_names_per_industry,
+        max_position_weight=config.max_position_weight,
         exit_policy=config.exit_policy,
         grace_rank_buffer=config.grace_rank_buffer,
         grace_momentum_window=config.grace_momentum_window,
@@ -593,6 +1038,8 @@ def run_research_pipeline(config_path: str) -> None:
         commission_rate=config.commission_rate,
         stamp_tax_rate=config.stamp_tax_rate,
         slippage_rate=config.slippage_rate,
+        max_trade_participation_rate=config.max_trade_participation_rate,
+        max_pending_days=config.max_pending_days,
         output_dir=config.model_backtest_output_dir,
     )
 

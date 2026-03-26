@@ -9,6 +9,7 @@ from pathlib import Path
 class ResearchRunConfig:
     storage_root: str
     factor_output_path: str
+    factor_universe_name: str
     factor_start_date: str
     factor_end_date: str
     label_column: str
@@ -29,6 +30,7 @@ class ResearchRunConfig:
     min_turnover_names: int
     min_daily_amount: float
     max_names_per_industry: int
+    max_position_weight: float
     exit_policy: str
     grace_rank_buffer: int
     grace_momentum_window: int
@@ -50,6 +52,8 @@ class ResearchRunConfig:
     commission_rate: float
     stamp_tax_rate: float
     slippage_rate: float
+    max_trade_participation_rate: float
+    max_pending_days: int
 
 
 def load_research_config(path: str | Path) -> ResearchRunConfig:
@@ -62,6 +66,7 @@ def load_research_config(path: str | Path) -> ResearchRunConfig:
     return ResearchRunConfig(
         storage_root=str(storage.get("root", "storage")),
         factor_output_path=str(factors["output_path"]),
+        factor_universe_name=str(factors.get("universe_name", "")),
         factor_start_date=str(factors["start_date"]),
         factor_end_date=str(factors["end_date"]),
         label_column=str(training.get("label_column", "excess_fwd_return_5")),
@@ -82,6 +87,7 @@ def load_research_config(path: str | Path) -> ResearchRunConfig:
         min_turnover_names=int(backtest.get("min_turnover_names", 3)),
         min_daily_amount=float(backtest.get("min_daily_amount", 0.0)),
         max_names_per_industry=int(backtest.get("max_names_per_industry", 0)),
+        max_position_weight=float(backtest.get("max_position_weight", 0.0)),
         exit_policy=str(backtest.get("exit_policy", "buffered_rank")),
         grace_rank_buffer=int(backtest.get("grace_rank_buffer", 0)),
         grace_momentum_window=int(backtest.get("grace_momentum_window", 3)),
@@ -103,4 +109,6 @@ def load_research_config(path: str | Path) -> ResearchRunConfig:
         commission_rate=float(backtest.get("commission_rate", 0.0003)),
         stamp_tax_rate=float(backtest.get("stamp_tax_rate", 0.001)),
         slippage_rate=float(backtest.get("slippage_rate", 0.0005)),
+        max_trade_participation_rate=float(backtest.get("max_trade_participation_rate", 0.0)),
+        max_pending_days=int(backtest.get("max_pending_days", 0)),
     )

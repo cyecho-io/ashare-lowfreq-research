@@ -11,6 +11,13 @@ from ashare_backtest.data.catalog import DatasetSummary, build_catalog, write_ca
 DEFAULT_SQLITE_SOURCE = (
     "/Users/yongqiuwu/works/github/Hyper-Alpha-Arena/ashare-arena/backend/ashare_arena.db"
 )
+DERIVED_UNIVERSE_ACTIVE = "all_active"
+DERIVED_UNIVERSE_TRADABLE = "tradable_core"
+TRADABLE_MIN_LISTING_DAYS = 120
+TRADABLE_RECENT_WINDOW = 20
+TRADABLE_MIN_RECENT_TRADING_DAYS = 15
+TRADABLE_MAX_RECENT_SUSPENDED_DAYS = 5
+TRADABLE_MIN_MEDIAN_DAILY_AMOUNT = 200_000.0
 
 
 class SQLiteParquetImporter:
@@ -23,11 +30,12 @@ class SQLiteParquetImporter:
         self.parquet_root.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.sqlite_path) as conn:
             bars_frame = self._load_bars(conn)
+            instruments_frame = self._load_instruments(conn)
             datasets = [
                 self._export_bars(bars_frame),
-                self._export_instruments(conn),
+                self._export_instruments(instruments_frame),
                 self._export_calendar(conn, bars_frame),
-                self._export_universe_memberships(conn),
+                self._export_universe_memberships(conn, instruments_frame, bars_frame),
             ]
         catalog = build_catalog(
             source_type="sqlite",
@@ -71,7 +79,7 @@ class SQLiteParquetImporter:
         target = self.parquet_root / "bars" / "daily.parquet"
         return self._write_dataset(frame, target, "bars.daily", "trade_date")
 
-    def _export_instruments(self, conn: sqlite3.Connection) -> DatasetSummary:
+    def _load_instruments(self, conn: sqlite3.Connection) -> pd.DataFrame:
         query = """
         select
             symbol,
@@ -92,6 +100,9 @@ class SQLiteParquetImporter:
             frame[column] = pd.to_datetime(frame[column], errors="coerce")
         frame["is_st"] = frame["is_st"].astype(bool)
         frame["is_active"] = frame["is_active"].astype(bool)
+        return frame
+
+    def _export_instruments(self, frame: pd.DataFrame) -> DatasetSummary:
         target = self.parquet_root / "instruments" / "ashare_instruments.parquet"
         return self._write_dataset(frame, target, "instruments.ashare", "listing_date")
 
@@ -114,12 +125,31 @@ class SQLiteParquetImporter:
             frame["has_night_session"] = frame["has_night_session"].astype(bool)
             bars_dates = set(bars_frame["trade_date"].dropna().unique().tolist())
             calendar_open_dates = set(frame.loc[frame["is_open"], "trade_date"].dropna().unique().tolist())
-            if len(calendar_open_dates) < len(bars_dates):
-                frame = self._derive_calendar_from_bars(bars_frame)
+            missing_bar_dates = sorted(bars_dates - calendar_open_dates)
+            if missing_bar_dates:
+                derived_rows = pd.DataFrame(
+                    {
+                        "trade_date": missing_bar_dates,
+                        "is_open": True,
+                        "has_night_session": False,
+                        "notes": "derived_from_equity_daily_bars",
+                    }
+                )
+                frame = (
+                    pd.concat([frame, derived_rows], ignore_index=True)
+                    .sort_values("trade_date")
+                    .drop_duplicates(subset=["trade_date"], keep="first")
+                    .reset_index(drop=True)
+                )
         target = self.parquet_root / "calendar" / "ashare_trading_calendar.parquet"
         return self._write_dataset(frame, target, "calendar.ashare", "trade_date")
 
-    def _export_universe_memberships(self, conn: sqlite3.Connection) -> DatasetSummary:
+    def _export_universe_memberships(
+        self,
+        conn: sqlite3.Connection,
+        instruments_frame: pd.DataFrame,
+        bars_frame: pd.DataFrame,
+    ) -> DatasetSummary:
         query = """
         select
             universe_name,
@@ -133,8 +163,93 @@ class SQLiteParquetImporter:
         frame = pd.read_sql_query(query, conn)
         for column in ("effective_date", "expiry_date"):
             frame[column] = pd.to_datetime(frame[column], errors="coerce")
+        derived = self._build_derived_universe_memberships(instruments_frame, bars_frame)
+        if not derived.empty:
+            frame = frame.loc[~frame["universe_name"].isin(derived["universe_name"].unique())]
+            frame = pd.concat([frame, derived], ignore_index=True).sort_values(
+                ["universe_name", "effective_date", "symbol"]
+            )
         target = self.parquet_root / "universe" / "memberships.parquet"
         return self._write_dataset(frame, target, "universe.memberships", "effective_date")
+
+    def _build_derived_universe_memberships(
+        self,
+        instruments_frame: pd.DataFrame,
+        bars_frame: pd.DataFrame,
+    ) -> pd.DataFrame:
+        if instruments_frame.empty:
+            return pd.DataFrame(columns=["universe_name", "symbol", "effective_date", "expiry_date", "source"])
+
+        snapshot_date = bars_frame["trade_date"].max()
+        if pd.isna(snapshot_date):
+            return pd.DataFrame(columns=["universe_name", "symbol", "effective_date", "expiry_date", "source"])
+
+        active = instruments_frame.loc[instruments_frame["is_active"]].copy()
+        if active.empty:
+            return pd.DataFrame(columns=["universe_name", "symbol", "effective_date", "expiry_date", "source"])
+
+        rows = [self._membership_frame(active["symbol"], DERIVED_UNIVERSE_ACTIVE, snapshot_date, "derived_active_gate")]
+
+        tradable = active.loc[~active["is_st"]].copy()
+        tradable["listing_days"] = (snapshot_date - tradable["listing_date"]).dt.days
+        tradable = tradable.loc[tradable["listing_days"].fillna(-1) >= TRADABLE_MIN_LISTING_DAYS].copy()
+        if tradable.empty:
+            return pd.concat(rows, ignore_index=True)
+
+        recent_start = snapshot_date - pd.Timedelta(days=TRADABLE_RECENT_WINDOW * 2)
+        recent_bars = bars_frame.loc[
+            (bars_frame["symbol"].isin(tradable["symbol"])) & (bars_frame["trade_date"] >= recent_start)
+        ].copy()
+        if recent_bars.empty:
+            return pd.concat(rows, ignore_index=True)
+
+        recent_bars = recent_bars.sort_values(["symbol", "trade_date"])
+        recent_bars = recent_bars.groupby("symbol", group_keys=False).tail(TRADABLE_RECENT_WINDOW)
+        recent_stats = (
+            recent_bars.groupby("symbol")
+            .agg(
+                recent_trading_days=("trade_date", "nunique"),
+                recent_suspended_days=("is_suspended", "sum"),
+                median_amount=("amount", "median"),
+                latest_suspended=("is_suspended", "last"),
+            )
+            .reset_index()
+        )
+        tradable = tradable.merge(recent_stats, on="symbol", how="left")
+        tradable = tradable.loc[
+            (tradable["recent_trading_days"].fillna(0) >= TRADABLE_MIN_RECENT_TRADING_DAYS)
+            & (tradable["recent_suspended_days"].fillna(TRADABLE_RECENT_WINDOW) <= TRADABLE_MAX_RECENT_SUSPENDED_DAYS)
+            & (~tradable["latest_suspended"].fillna(True))
+            & (tradable["median_amount"].fillna(0.0) >= TRADABLE_MIN_MEDIAN_DAILY_AMOUNT)
+        ].copy()
+        if not tradable.empty:
+            rows.append(
+                self._membership_frame(
+                    tradable["symbol"],
+                    DERIVED_UNIVERSE_TRADABLE,
+                    snapshot_date,
+                    "derived_tradable_gate",
+                )
+            )
+        return pd.concat(rows, ignore_index=True)
+
+    @staticmethod
+    def _membership_frame(
+        symbols: pd.Series,
+        universe_name: str,
+        effective_date: pd.Timestamp,
+        source: str,
+    ) -> pd.DataFrame:
+        values = sorted(pd.Series(symbols).astype(str).unique().tolist())
+        return pd.DataFrame(
+            {
+                "universe_name": universe_name,
+                "symbol": values,
+                "effective_date": effective_date,
+                "expiry_date": pd.NaT,
+                "source": source,
+            }
+        )
 
     @staticmethod
     def _derive_calendar_from_bars(bars_frame: pd.DataFrame) -> pd.DataFrame:

@@ -30,6 +30,8 @@ def load_run_config(path: str | Path) -> RunConfig:
             stamp_tax_rate=float(backtest_section.get("stamp_tax_rate", 0.001)),
             slippage_rate=float(backtest_section.get("slippage_rate", 0.0005)),
             rebalance_price=str(backtest_section.get("rebalance_price", "open")),
+            max_trade_participation_rate=float(backtest_section.get("max_trade_participation_rate", 0.0)),
+            max_pending_days=int(backtest_section.get("max_pending_days", 0)),
         ),
         storage_root=str(payload.get("storage", {}).get("root", "storage")),
         output_dir=str(payload.get("output", {}).get("dir", "results/latest")),

@@ -1,75 +1,157 @@
-# A 股低频策略回测工具
+# A-Share Low-Frequency Backtesting Toolkit
 
-这是一个面向个人使用的 A 股低频策略回测项目，目标是用最小可维护系统完成以下闭环：
+[中文说明](README.zh-CN.md)
 
-- 用“受限 Python”编写策略脚本
-- 将策略脚本校验并注册进策略库
-- 选择股票池、时间范围、交易成本参数运行日线回测
-- 输出基础绩效指标、交易记录和净值序列
+This repository is a personal A-share research and backtesting toolkit focused on a narrow, maintainable workflow:
 
-当前仓库处于 MVP 骨架阶段，优先解决以下问题：
+- sync and standardize local A-share market data
+- build factor panels and train score models
+- run score-driven backtests with realistic execution constraints
+- inspect results in a lightweight web console
+- generate latest stock selection and premarket reference artifacts
 
-- 明确策略脚本边界，避免任意 Python 执行
-- 把数据读取、调仓调度、成交模拟、持仓管理、绩效统计收口到回测引擎
-- 让一个人可以逐步扩展，而不是一次性做成通用量化平台
+The project is intentionally opinionated. It is not trying to become a general-purpose quant platform.
 
-## MVP 边界
+## Current Scope
 
-详细设计见 [docs/mvp.md](/Users/yongqiuwu/works/github/Trade/docs/mvp.md)。
+- Market: mainland China A-shares
+- Frequency: daily bars
+- Strategy shape: long-only stock portfolios
+- Research loop: factor build -> model training -> walk-forward / latest inference -> score backtest
+- Execution controls: commission, stamp tax, slippage, participation cap, pending-order handling
+- Interfaces: CLI plus a local backtest web console
 
-第一阶段只覆盖：
+Out of scope for now:
 
-- 市场：A 股
-- 频率：日线
-- 策略类型：多头股票
-- 调仓：每 2 到 3 个交易日为主，也支持更稀疏日频调仓
-- 成交：按下一交易日开盘或当日收盘的简化成交模型扩展
-- 风控：基础仓位约束、停牌与涨跌停不可成交、手续费和滑点
+- intraday / tick-level simulation
+- derivatives, margin, or multi-asset portfolios
+- distributed scheduling and multi-tenant infrastructure
+- arbitrary unrestricted Python strategy execution
 
-第一阶段明确不做：
+## Repository Layout
 
-- 分钟级、逐笔、盘口回测
-- 融资融券、期货、期权
-- 分布式任务调度
-- 多租户、Web 平台、权限系统
-- 任意 Python 研究环境
+- `src/ashare_backtest/`: core package
+- `src/ashare_backtest/web/`: local backtest and paper-trading console
+- `configs/`: runnable backtest and research configs
+- `research/`: factor panels, model outputs, latest artifacts
+- `storage/`: normalized parquet market data and source SQLite database
+- `strategies/`: protocol-constrained strategy scripts
+- `docs/`: research notes, runbooks, and design docs
+- `tests/`: regression tests
 
-## 目录
+## Installation
 
-- `docs/`: MVP 边界、架构和流程说明
-- `storage/`: 标准化后的本地市场数据
-- `src/ashare_backtest/`: 核心代码
-- `strategies/`: 已通过协议约束的策略脚本
-- `examples/`: 策略模板和示例
-- `tests/`: 后续测试
-
-## 快速开始
+Requires Python 3.11+.
 
 ```bash
-python -m ashare_backtest.cli.main validate strategies/buy_and_hold.py
-python -m ashare_backtest.cli.main show-template
-python -m ashare_backtest.cli.main import-sqlite /path/to/source.db
-python -m ashare_backtest.cli.main run-backtest strategies/three_day_momentum.py --storage-root storage --start-date 2024-02-01 --end-date 2024-12-31 --universe 600519.SH,000001.SZ,300750.SZ --output-dir results/three_day_momentum
-python -m ashare_backtest.cli.main run-config configs/three_day_momentum.toml
-python -m ashare_backtest.cli.main build-factors --storage-root storage --symbols 600519.SH,000001.SZ,300750.SZ --start-date 2024-02-01 --end-date 2024-12-31
-python -m ashare_backtest.cli.main run-research-config configs/research_excess_v3.toml
+python -m pip install -e .
 ```
 
-后续会补充：
+This exposes:
 
-- 数据适配层
-- 真正的回测循环
-- 成交撮合与绩效统计
-- 策略生成与入库命令
+- `ashare-backtest`
+- `ashare-backtest-web`
 
-## 当前推荐研究链路
+## Quick Start
 
-当前已验证过一条更有效的研究配置：
+Validate a strategy script:
 
-- 因子面板：`industry_v4`
-- 标签：`industry_excess_fwd_return_5`
-- 训练：按月 walk-forward，训练窗口 12 个月
-- 组合：`top_k=6`、`rebalance_every=5`、`min_hold_bars=8`、`keep_buffer=2`、`min_turnover_names=3`
-- 风险约束：`max_names_per_industry=2`
+```bash
+ashare-backtest validate strategies/buy_and_hold.py
+```
 
-推荐直接通过 [research_industry_v4_v1_1.toml](/Users/yongqiuwu/works/github/Trade/configs/research_industry_v4_v1_1.toml) 复现。
+Import local SQLite market data into parquet storage:
+
+```bash
+ashare-backtest import-sqlite storage/source/ashare_arena_sync.db --storage-root storage
+```
+
+Build a factor panel from a named universe:
+
+```bash
+ashare-backtest build-factors \
+  --storage-root storage \
+  --universe-name tradable_core \
+  --start-date 2024-02-01 \
+  --end-date 2024-12-31
+```
+
+Run a configured research pipeline:
+
+```bash
+ashare-backtest run-research-config configs/research_industry_v4_v1_1.toml
+```
+
+Run a backtest from exported model scores:
+
+```bash
+ashare-backtest run-model-backtest \
+  --scores-path research/models/latest_scores.parquet \
+  --storage-root storage \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --output-dir results/model_score_backtest
+```
+
+## Data Sync
+
+Sync daily bars from Tushare into the project source SQLite database:
+
+```bash
+ashare-backtest sync-tushare-sqlite --start 20240101 --end 20260331
+```
+
+Sync benchmark index history into parquet storage:
+
+```bash
+ashare-backtest sync-tushare-benchmark --symbol 000300.SH --start 20240101 --end 20260331
+```
+
+`TUSHARE_TOKEN` is used by default when `--token` is not provided.
+
+## Web Console
+
+Start the local web console:
+
+```bash
+ashare-backtest-web
+```
+
+The console provides:
+
+- backtest run submission from configured presets
+- result browsing and summary metrics
+- equity curve visualization with optional benchmark overlay
+- trade log inspection
+- paper-trading / latest-signal views for the configured strategy set
+
+## Recommended Research Preset
+
+The current recommended preset is centered on [`configs/research_industry_v4_v1_1.toml`](/Users/yongqiuwu/works/github/Trade/configs/research_industry_v4_v1_1.toml):
+
+- factor panel: `industry_v4`
+- label: `industry_excess_fwd_return_5`
+- training: monthly walk-forward with a 12-month training window
+- portfolio: `top_k=6`, `rebalance_every=5`, `min_hold_bars=8`, `keep_buffer=2`
+- turnover control: `min_turnover_names=3`
+- industry constraint: `max_names_per_industry=2`
+
+The default tradable universe workflow gates stocks at the `universe` layer before factor construction. After import, the project generates:
+
+- `all_active`: all currently active stocks
+- `tradable_core`: active, non-ST names listed for at least 120 days, with tradability and liquidity filters applied
+
+## Useful Documents
+
+- [`docs/mvp.md`](/Users/yongqiuwu/works/github/Trade/docs/mvp.md)
+- [`docs/research-pipeline.md`](/Users/yongqiuwu/works/github/Trade/docs/research-pipeline.md)
+- [`docs/strategy-v2-live-readiness-checklist.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-live-readiness-checklist.md)
+- [`docs/strategy-v2-roadmap.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-roadmap.md)
+
+## Testing
+
+Run the test suite with:
+
+```bash
+python3 -m pytest
+```

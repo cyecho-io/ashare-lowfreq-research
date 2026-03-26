@@ -85,6 +85,46 @@ def test_rank_momentum_grace_keeps_positive_trend_position(tmp_path) -> None:
     assert "CCC" in selected
 
 
+def test_allocate_does_not_keep_stale_position_under_turnover_floor(tmp_path) -> None:
+    scores_path, storage_root = _write_inputs(
+        tmp_path,
+        [
+            ("AAA", 0.90),
+            ("BBB", 0.80),
+            ("CCC", 0.70),
+        ],
+    )
+    strategy = ScoreTopKStrategy(
+        ScoreStrategyConfig(
+            scores_path=scores_path,
+            storage_root=storage_root,
+            top_k=2,
+            min_hold_bars=1,
+            keep_buffer=0,
+            min_turnover_names=3,
+        )
+    )
+    context = StrategyContext(
+        trade_date=date(2025, 1, 13),
+        universe=("AAA", "BBB", "CCC"),
+        bars={
+            "AAA": _history("AAA", [10.0, 10.1, 10.2]),
+            "BBB": _history("BBB", [10.0, 10.0, 10.0]),
+            "CCC": _history("CCC", [10.0]),
+        },
+        positions={
+            "AAA": Position("AAA", 100, 10.0, 10.2),
+            "CCC": Position("CCC", 100, 10.0, 10.0),
+        },
+        cash=0.0,
+    )
+
+    allocation = strategy.allocate(context, ["AAA", "BBB"])
+
+    assert set(allocation.target_weights) == {"AAA", "BBB"}
+    assert "CCC" not in allocation.target_weights
+
+
 def test_rank_momentum_grace_exits_when_rank_and_momentum_both_break(tmp_path) -> None:
     scores_path, storage_root = _write_inputs(
         tmp_path,
@@ -601,3 +641,43 @@ def test_strong_trim_slowdown_keeps_equal_weight_when_signal_not_strong(tmp_path
 
     assert allocation.target_weights["AAA"] == 0.5
     assert allocation.target_weights["BBB"] == 0.5
+
+
+def test_max_position_weight_caps_target_weights(tmp_path) -> None:
+    scores_path, storage_root = _write_inputs(
+        tmp_path,
+        [
+            ("AAA", 0.90),
+            ("BBB", 0.80),
+            ("CCC", 0.70),
+        ],
+    )
+    strategy = ScoreTopKStrategy(
+        ScoreStrategyConfig(
+            scores_path=scores_path,
+            storage_root=storage_root,
+            top_k=3,
+            min_hold_bars=1,
+            keep_buffer=0,
+            strong_trim_slowdown=1.0,
+            strong_trim_momentum_window=2,
+            strong_trim_min_return=0.01,
+            max_position_weight=0.4,
+        )
+    )
+    context = StrategyContext(
+        trade_date=date(2025, 1, 13),
+        universe=("AAA", "BBB", "CCC"),
+        bars={
+            "AAA": _history("AAA", [10.0, 11.0, 12.0]),
+            "BBB": _history("BBB", [10.0, 10.0, 10.0]),
+            "CCC": _history("CCC", [10.0, 10.0, 10.0]),
+        },
+        positions={"AAA": Position("AAA", 800, 10.0, 12.0)},
+        cash=2000.0,
+    )
+
+    allocation = strategy.allocate(context, ["AAA", "BBB", "CCC"])
+
+    assert allocation.target_weights["AAA"] <= 0.4
+    assert round(sum(allocation.target_weights.values()), 6) == 1.0

@@ -5,12 +5,15 @@ from pathlib import Path
 
 import pandas as pd
 
+from ashare_backtest.data import load_universe_symbols
+
 
 @dataclass(frozen=True)
 class FactorBuildConfig:
     storage_root: str
     output_path: str
     symbols: tuple[str, ...] = ()
+    universe_name: str = ""
     start_date: str | None = None
     end_date: str | None = None
 
@@ -18,8 +21,9 @@ class FactorBuildConfig:
 class FactorBuilder:
     def __init__(self, config: FactorBuildConfig) -> None:
         self.config = config
-        self.bars_path = Path(config.storage_root) / "parquet" / "bars" / "daily.parquet"
-        self.instruments_path = Path(config.storage_root) / "parquet" / "instruments" / "ashare_instruments.parquet"
+        self.storage_root = Path(config.storage_root)
+        self.bars_path = self.storage_root / "parquet" / "bars" / "daily.parquet"
+        self.instruments_path = self.storage_root / "parquet" / "instruments" / "ashare_instruments.parquet"
 
     def build(self) -> pd.DataFrame:
         frame = pd.read_parquet(self.bars_path)
@@ -27,8 +31,15 @@ class FactorBuilder:
         instruments = pd.read_parquet(self.instruments_path, columns=["symbol", "industry_level_1"])
         frame = frame.merge(instruments, on="symbol", how="left")
 
-        if self.config.symbols:
-            frame = frame.loc[frame["symbol"].isin(self.config.symbols)]
+        symbols = self.config.symbols
+        if self.config.universe_name:
+            symbols = load_universe_symbols(
+                storage_root=self.storage_root,
+                universe_name=self.config.universe_name,
+                as_of_date=self.config.end_date,
+            )
+        if symbols:
+            frame = frame.loc[frame["symbol"].isin(symbols)]
         if self.config.start_date:
             frame = frame.loc[frame["trade_date"] >= pd.Timestamp(self.config.start_date)]
         if self.config.end_date:
@@ -62,10 +73,8 @@ class FactorBuilder:
         frame["volatility_10"] = grouped["ret_1"].transform(lambda s: s.rolling(10).std())
         frame["volatility_20"] = grouped["ret_1"].transform(lambda s: s.rolling(20).std())
         frame["volatility_60"] = grouped["ret_1"].transform(lambda s: s.rolling(60).std())
-        frame["range_ratio_5"] = grouped.apply(
-            lambda x: (x["high"] / x["low"] - 1).rolling(5).mean(),
-            include_groups=False,
-        ).reset_index(level=0, drop=True)
+        intraday_range = frame["high"] / frame["low"] - 1
+        frame["range_ratio_5"] = intraday_range.groupby(frame["symbol"]).transform(lambda s: s.rolling(5).mean())
 
         volume_ma_5 = grouped["volume"].transform(lambda s: s.rolling(5).mean())
         volume_ma_20 = grouped["volume"].transform(lambda s: s.rolling(20).mean())

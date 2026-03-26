@@ -1,17 +1,49 @@
-from .analysis import LayeredAnalysisConfig, analyze_score_layers
+from .analysis import (
+    CapacityAnalysisConfig,
+    LayeredAnalysisConfig,
+    MonthlyComparisonConfig,
+    PremarketReferenceConfig,
+    RiskExposureConfig,
+    StrategyStateConfig,
+    generate_strategy_state,
+    generate_premarket_reference,
+    analyze_score_layers,
+    analyze_trade_capacity,
+    analyze_monthly_risk_exposures,
+    compare_backtest_monthly_returns,
+)
 from .score_strategy import ScoreStrategyConfig, ScoreTopKStrategy
 from .sweep import SweepConfig, run_model_sweep
-from .trainer import ModelTrainConfig, WalkForwardConfig, train_lightgbm_model, train_lightgbm_walk_forward
+from .trainer import (
+    LatestInferenceConfig,
+    ModelTrainConfig,
+    WalkForwardConfig,
+    train_lightgbm_latest_inference,
+    train_lightgbm_model,
+    train_lightgbm_walk_forward,
+)
 
 __all__ = [
     "LayeredAnalysisConfig",
+    "CapacityAnalysisConfig",
+    "LatestInferenceConfig",
     "ModelTrainConfig",
+    "MonthlyComparisonConfig",
+    "PremarketReferenceConfig",
+    "RiskExposureConfig",
+    "StrategyStateConfig",
     "ScoreStrategyConfig",
     "ScoreTopKStrategy",
     "SweepConfig",
     "WalkForwardConfig",
+    "generate_strategy_state",
+    "generate_premarket_reference",
     "analyze_score_layers",
+    "analyze_trade_capacity",
+    "analyze_monthly_risk_exposures",
+    "compare_backtest_monthly_returns",
     "run_model_sweep",
+    "train_lightgbm_latest_inference",
     "train_lightgbm_model",
     "train_lightgbm_walk_forward",
 ]
