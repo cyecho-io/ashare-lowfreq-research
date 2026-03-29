@@ -189,9 +189,70 @@ def test_factor_builder_filters_by_universe_name(tmp_path) -> None:
             output_path=output_path.as_posix(),
             universe_name="tradable_core",
             start_date="2026-01-01",
-            end_date="2026-03-31",
+            as_of_date="2026-03-31",
         )
     ).build()
 
     assert panel["symbol"].nunique() == 1
     assert set(panel["symbol"]) == {"AAA"}
+
+
+def test_load_universe_symbols_derives_tradable_core_for_historical_date_without_matching_membership(tmp_path) -> None:
+    storage_root = tmp_path / "storage"
+    bars_path = storage_root / "parquet" / "bars" / "daily.parquet"
+    instruments_path = storage_root / "parquet" / "instruments" / "ashare_instruments.parquet"
+    universe_path = storage_root / "parquet" / "universe" / "memberships.parquet"
+
+    bars_path.parent.mkdir(parents=True, exist_ok=True)
+    instruments_path.parent.mkdir(parents=True, exist_ok=True)
+    universe_path.parent.mkdir(parents=True, exist_ok=True)
+
+    trade_dates = pd.bdate_range("2026-01-05", periods=30)
+    pd.DataFrame(
+        [
+            {
+                "symbol": symbol,
+                "trade_date": trade_date,
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.5,
+                "close": close,
+                "prev_close": close - 0.1,
+                "adj_factor": 1.0,
+                "volume": 1_000_000.0,
+                "amount": amount,
+                "turnover_rate": 0.01,
+                "limit_up_price": 11.0,
+                "limit_down_price": 9.0,
+                "is_suspended": False,
+                "is_limit_up": False,
+                "is_limit_down": False,
+            }
+            for symbol, amount in (("AAA", 30_000_000.0), ("BBB", 30_000_000.0), ("CCC", 100_000.0))
+            for close, trade_date in zip(range(30), trade_dates, strict=False)
+        ]
+    ).to_parquet(bars_path, index=False)
+
+    pd.DataFrame(
+        [
+            {"symbol": "AAA", "listing_date": "2024-01-01", "delisting_date": None, "is_st": False, "is_active": True},
+            {"symbol": "BBB", "listing_date": "2024-01-01", "delisting_date": None, "is_st": True, "is_active": True},
+            {"symbol": "CCC", "listing_date": "2024-01-01", "delisting_date": None, "is_st": False, "is_active": True},
+        ]
+    ).to_parquet(instruments_path, index=False)
+
+    pd.DataFrame(
+        [
+            {
+                "universe_name": "tradable_core",
+                "symbol": "AAA",
+                "effective_date": "2026-03-27",
+                "expiry_date": None,
+                "source": "latest_snapshot_only",
+            }
+        ]
+    ).to_parquet(universe_path, index=False)
+
+    symbols = load_universe_symbols(storage_root, "tradable_core", as_of_date="2026-02-02")
+
+    assert symbols == ("AAA",)

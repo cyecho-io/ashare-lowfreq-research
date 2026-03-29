@@ -6,6 +6,20 @@ from pathlib import Path
 import pandas as pd
 
 from ashare_backtest.data import load_universe_symbols
+from ashare_backtest.logging_utils import get_logger
+
+
+def resolve_factor_snapshot_path(
+    factor_spec_id: str,
+    as_of_date: str,
+    universe_name: str = "",
+    start_date: str = "",
+    root: str | Path = "research/factors",
+) -> str:
+    base = Path(root) / factor_spec_id
+    if universe_name and start_date:
+        return (base / universe_name / f"start_{start_date}" / f"asof_{as_of_date}.parquet").as_posix()
+    return (base / f"{as_of_date}.parquet").as_posix()
 
 
 @dataclass(frozen=True)
@@ -15,7 +29,7 @@ class FactorBuildConfig:
     symbols: tuple[str, ...] = ()
     universe_name: str = ""
     start_date: str | None = None
-    end_date: str | None = None
+    as_of_date: str | None = None
 
 
 class FactorBuilder:
@@ -24,31 +38,46 @@ class FactorBuilder:
         self.storage_root = Path(config.storage_root)
         self.bars_path = self.storage_root / "parquet" / "bars" / "daily.parquet"
         self.instruments_path = self.storage_root / "parquet" / "instruments" / "ashare_instruments.parquet"
+        self.logger = get_logger("factors.builder")
 
     def build(self) -> pd.DataFrame:
+        self.logger.info(
+            "build factor panel start output=%s universe_name=%s as_of_date=%s start_date=%s",
+            self.config.output_path,
+            self.config.universe_name or "-",
+            self.config.as_of_date or "-",
+            self.config.start_date or "-",
+        )
         frame = pd.read_parquet(self.bars_path)
         frame = frame.sort_values(["symbol", "trade_date"]).copy()
         instruments = pd.read_parquet(self.instruments_path, columns=["symbol", "industry_level_1"])
         frame = frame.merge(instruments, on="symbol", how="left")
 
         symbols = self.config.symbols
+        as_of_date = self.config.as_of_date
         if self.config.universe_name:
             symbols = load_universe_symbols(
                 storage_root=self.storage_root,
                 universe_name=self.config.universe_name,
-                as_of_date=self.config.end_date,
+                as_of_date=as_of_date,
             )
         if symbols:
             frame = frame.loc[frame["symbol"].isin(symbols)]
         if self.config.start_date:
             frame = frame.loc[frame["trade_date"] >= pd.Timestamp(self.config.start_date)]
-        if self.config.end_date:
-            frame = frame.loc[frame["trade_date"] <= pd.Timestamp(self.config.end_date)]
+        if as_of_date:
+            frame = frame.loc[frame["trade_date"] <= pd.Timestamp(as_of_date)]
 
         panel = self._build_factor_panel(frame)
         output_path = Path(self.config.output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         panel.to_parquet(output_path, index=False)
+        self.logger.info(
+            "build factor panel complete output=%s rows=%s symbols=%s",
+            output_path.as_posix(),
+            len(panel),
+            panel["symbol"].nunique() if not panel.empty else 0,
+        )
         return panel
 
     @staticmethod

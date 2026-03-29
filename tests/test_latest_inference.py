@@ -4,13 +4,13 @@ import json
 
 import pandas as pd
 
-from ashare_backtest.research.trainer import LatestInferenceConfig, train_lightgbm_latest_inference
+from ashare_backtest.research.trainer import WalkForwardAsOfDateConfig, train_lightgbm_walk_forward_as_of_date
 
 
-def test_train_lightgbm_latest_inference_scores_latest_unlabeled_date(tmp_path) -> None:
+def test_train_lightgbm_walk_forward_as_of_date_scores_single_date(tmp_path) -> None:
     factor_panel_path = tmp_path / "factor_panel.parquet"
-    output_scores_path = tmp_path / "latest_scores.parquet"
-    output_metrics_path = tmp_path / "latest_metrics.json"
+    output_scores_path = tmp_path / "walk_forward_scores_2025-01-06.parquet"
+    output_metrics_path = tmp_path / "walk_forward_metrics_2025-01-06.json"
 
     rows = [
         {
@@ -172,19 +172,19 @@ def test_train_lightgbm_latest_inference_scores_latest_unlabeled_date(tmp_path) 
     ]
     pd.DataFrame(rows).to_parquet(factor_panel_path, index=False)
 
-    metrics = train_lightgbm_latest_inference(
-        LatestInferenceConfig(
+    metrics = train_lightgbm_walk_forward_as_of_date(
+        WalkForwardAsOfDateConfig(
             factor_panel_path=factor_panel_path.as_posix(),
             output_scores_path=output_scores_path.as_posix(),
             output_metrics_path=output_metrics_path.as_posix(),
-            inference_date="2025-01-06",
+            as_of_date="2025-01-06",
             train_window_months=12,
             n_estimators=20,
         )
     )
 
     scored = pd.read_parquet(output_scores_path)
-    assert metrics["inference_date"] == "2025-01-06"
+    assert metrics["as_of_date"] == "2025-01-06"
     assert metrics["scored_rows"] == 2
     assert set(scored["symbol"]) == {"AAA", "BBB"}
     assert set(pd.to_datetime(scored["trade_date"]).dt.date.astype(str)) == {"2025-01-06"}

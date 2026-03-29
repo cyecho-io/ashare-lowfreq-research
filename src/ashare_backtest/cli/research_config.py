@@ -4,13 +4,18 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from ashare_backtest.factors import resolve_factor_snapshot_path
+
 
 @dataclass(frozen=True)
 class ResearchRunConfig:
     storage_root: str
+    factor_spec_id: str
     factor_output_path: str
+    factor_snapshot_path: str
     factor_universe_name: str
     factor_start_date: str
+    factor_as_of_date: str
     factor_end_date: str
     label_column: str
     train_window_months: int
@@ -29,6 +34,7 @@ class ResearchRunConfig:
     keep_buffer: int
     min_turnover_names: int
     min_daily_amount: float
+    max_close_price: float
     max_names_per_industry: int
     max_position_weight: float
     exit_policy: str
@@ -56,19 +62,54 @@ class ResearchRunConfig:
     max_pending_days: int
 
 
+def resolve_research_config_path(config_path: str | Path = "", factor_spec_id: str = "") -> Path:
+    if config_path:
+        return Path(config_path).resolve()
+    if factor_spec_id:
+        candidate = Path("configs") / f"{factor_spec_id}.toml"
+        if candidate.exists():
+            return candidate.resolve()
+        raise FileNotFoundError(f"Research config not found for factor_spec_id={factor_spec_id}: {candidate}")
+    raise ValueError("Either config_path or factor_spec_id must be provided")
+
+
+def resolve_dated_output_path(base_path: str | Path, as_of_date: str) -> str:
+    path = Path(base_path)
+    return path.with_name(f"{path.stem}_{as_of_date}{path.suffix}").as_posix()
+
+
 def load_research_config(path: str | Path) -> ResearchRunConfig:
-    payload = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    resolved_path = Path(path)
+    payload = tomllib.loads(resolved_path.read_text(encoding="utf-8"))
     storage = payload["storage"]
     factors = payload["factors"]
     training = payload["training"]
     analysis = payload["analysis"]
     backtest = payload["model_backtest"]
+    factor_spec = payload.get("factor_spec", {})
+    research_snapshot = payload.get("research_snapshot", {})
+    factor_spec_id = str(factor_spec.get("id") or factors.get("id") or resolved_path.stem)
+    factor_universe_name = str(factor_spec.get("universe_name") or factors.get("universe_name", ""))
+    factor_start_date = str(factor_spec.get("start_date") or factors["start_date"])
+    factor_as_of_date = str(research_snapshot.get("as_of_date") or factors.get("as_of_date") or factors["end_date"])
+    factor_output_path = str(
+        factors.get("output_path")
+        or resolve_factor_snapshot_path(
+            factor_spec_id=factor_spec_id,
+            as_of_date=factor_as_of_date,
+            universe_name=factor_universe_name,
+            start_date=factor_start_date,
+        )
+    )
     return ResearchRunConfig(
         storage_root=str(storage.get("root", "storage")),
-        factor_output_path=str(factors["output_path"]),
-        factor_universe_name=str(factors.get("universe_name", "")),
-        factor_start_date=str(factors["start_date"]),
-        factor_end_date=str(factors["end_date"]),
+        factor_spec_id=factor_spec_id,
+        factor_output_path=factor_output_path,
+        factor_snapshot_path=factor_output_path,
+        factor_universe_name=factor_universe_name,
+        factor_start_date=factor_start_date,
+        factor_as_of_date=factor_as_of_date,
+        factor_end_date=factor_as_of_date,
         label_column=str(training.get("label_column", "excess_fwd_return_5")),
         train_window_months=int(training.get("train_window_months", 12)),
         test_start_month=str(training["test_start_month"]),
@@ -86,6 +127,7 @@ def load_research_config(path: str | Path) -> ResearchRunConfig:
         keep_buffer=int(backtest.get("keep_buffer", 2)),
         min_turnover_names=int(backtest.get("min_turnover_names", 3)),
         min_daily_amount=float(backtest.get("min_daily_amount", 0.0)),
+        max_close_price=float(backtest.get("max_close_price", 0.0)),
         max_names_per_industry=int(backtest.get("max_names_per_industry", 0)),
         max_position_weight=float(backtest.get("max_position_weight", 0.0)),
         exit_policy=str(backtest.get("exit_policy", "buffered_rank")),

@@ -8,7 +8,7 @@ This repository is a personal A-share research and backtesting toolkit focused o
 - build factor panels and train score models
 - run score-driven backtests with realistic execution constraints
 - inspect results in a lightweight web console
-- generate latest stock selection and premarket reference artifacts
+- generate latest stock selection, premarket reference, and simulation artifacts
 
 The project is intentionally opinionated. It is not trying to become a general-purpose quant platform.
 
@@ -31,13 +31,15 @@ Out of scope for now:
 ## Repository Layout
 
 - `src/ashare_backtest/`: core package
-- `src/ashare_backtest/web/`: local backtest and paper-trading console
+- `src/ashare_backtest/web/`: local dashboard, backtest, and simulation console
 - `configs/`: runnable backtest and research configs
-- `research/`: factor panels, model outputs, latest artifacts
+- `research/`: local factor panels, model outputs, and latest artifacts
 - `storage/`: normalized parquet market data and source SQLite database
 - `strategies/`: protocol-constrained strategy scripts
 - `docs/`: research notes, runbooks, and design docs
 - `tests/`: regression tests
+
+Generated outputs under `results/`, `research/factors/`, and `research/models/` are treated as local artifacts and are ignored by Git.
 
 ## Installation
 
@@ -66,14 +68,14 @@ Import local SQLite market data into parquet storage:
 ashare-backtest import-sqlite storage/source/ashare_arena_sync.db --storage-root storage
 ```
 
-Build a factor panel from a named universe:
+Build a factor snapshot from a named universe:
 
 ```bash
 ashare-backtest build-factors \
   --storage-root storage \
   --universe-name tradable_core \
   --start-date 2024-02-01 \
-  --end-date 2024-12-31
+  --as-of-date 2024-12-31
 ```
 
 Run a configured research pipeline:
@@ -86,7 +88,7 @@ Run a backtest from exported model scores:
 
 ```bash
 ashare-backtest run-model-backtest \
-  --scores-path research/models/latest_scores.parquet \
+  --scores-path research/models/walk_forward_scores.parquet \
   --storage-root storage \
   --start-date 2025-01-01 \
   --end-date 2025-12-31 \
@@ -119,11 +121,12 @@ ashare-backtest-web
 
 The console provides:
 
+- a landing dashboard for trading-calendar and data-source readiness
 - backtest run submission from configured presets
 - result browsing and summary metrics
 - equity curve visualization with optional benchmark overlay
 - trade log inspection
-- paper-trading / latest-signal views for the configured strategy set
+- simulation-account creation, lineage inspection, and execution history views
 
 ## Recommended Research Preset
 
@@ -145,6 +148,8 @@ The default tradable universe workflow gates stocks at the `universe` layer befo
 
 - [`docs/mvp.md`](/Users/yongqiuwu/works/github/Trade/docs/mvp.md)
 - [`docs/research-pipeline.md`](/Users/yongqiuwu/works/github/Trade/docs/research-pipeline.md)
+- [`docs/strategy-v1-1-premarket-runbook.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v1-1-premarket-runbook.md)
+- [`docs/strategy-v1-1-latest-active-data-source.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v1-1-latest-active-data-source.md)
 - [`docs/strategy-v2-live-readiness-checklist.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-live-readiness-checklist.md)
 - [`docs/strategy-v2-roadmap.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-roadmap.md)
 

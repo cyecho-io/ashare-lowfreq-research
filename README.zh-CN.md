@@ -2,24 +2,26 @@
 
 [English README](README.md)
 
-这是一个面向个人使用的 A 股研究与回测工具，目标是围绕一条可维护、可复现的闭环工作流来做：
+这是一个面向个人研究使用的 A 股低频回测与盘前准备工具，目标是把数据同步、因子构建、模型训练、分数回测和模拟执行收敛到一条可维护的本地工作流里。
 
-- 同步并标准化本地 A 股市场数据
-- 构建因子面板并训练打分模型
-- 基于分数输出运行带执行约束的回测
-- 通过轻量 Web 控制台查看结果
-- 生成最新选股、盘前参考和策略状态文件
+当前仓库重点解决的是：
 
-这个仓库是有边界的，不打算扩展成通用量化平台。
+- 同步并标准化本地 A 股日线数据
+- 基于 universe 构建 factor snapshot 并训练分数模型
+- 运行 walk-forward / as-of-date 打分与分数驱动回测
+- 生成盘前参考、latest 状态和模拟账户计划
+- 通过本地 Web 控制台查看数据状态、回测结果和模拟执行历史
+
+这个项目是有边界的，不打算扩展成通用量化平台。
 
 ## 当前边界
 
 - 市场：A 股
 - 频率：日线
 - 策略类型：多头股票组合
-- 研究链路：因子构建 -> 模型训练 -> walk-forward / latest inference -> 分数驱动回测
+- 研究链路：factor build -> model training -> walk-forward / latest inference -> score backtest
 - 执行约束：手续费、印花税、滑点、成交参与率上限、挂单保留天数
-- 使用方式：CLI + 本地 Web 回测控制台
+- 使用方式：CLI + 本地 Web 控制台
 
 当前明确不做：
 
@@ -30,14 +32,16 @@
 
 ## 目录
 
-- `src/ashare_backtest/`: 核心代码
-- `src/ashare_backtest/web/`: 本地回测与模拟盘控制台
-- `configs/`: 回测和研究配置
-- `research/`: 因子面板、模型输出和 latest 工件
-- `storage/`: 标准化 parquet 数据和源 SQLite 数据库
-- `strategies/`: 受协议约束的策略脚本
-- `docs/`: 设计文档、研究笔记和 runbook
-- `tests/`: 回归测试
+- `src/ashare_backtest/`：核心代码
+- `src/ashare_backtest/web/`：数据看板、回测控制台、模拟成交台
+- `configs/`：研究和回测配置
+- `research/`：本地产生的 factor、model 和 latest 工件
+- `storage/`：标准化 parquet 数据和源 SQLite 数据库
+- `strategies/`：受协议约束的策略脚本
+- `docs/`：设计文档、研究笔记和 runbook
+- `tests/`：回归测试
+
+`results/`、`research/factors/`、`research/models/` 下的产物默认视为本地生成文件，已经加入 `.gitignore`，不再作为仓库源码的一部分长期追踪。
 
 ## 安装
 
@@ -54,26 +58,20 @@ python -m pip install -e .
 
 ## 快速开始
 
-校验策略脚本：
-
-```bash
-ashare-backtest validate strategies/buy_and_hold.py
-```
-
 把本地 SQLite 行情导入 parquet 存储：
 
 ```bash
 ashare-backtest import-sqlite storage/source/ashare_arena_sync.db --storage-root storage
 ```
 
-基于 universe 构建因子面板：
+基于指定 universe 构建 factor snapshot：
 
 ```bash
 ashare-backtest build-factors \
   --storage-root storage \
   --universe-name tradable_core \
   --start-date 2024-02-01 \
-  --end-date 2024-12-31
+  --as-of-date 2024-12-31
 ```
 
 运行研究配置：
@@ -86,7 +84,7 @@ ashare-backtest run-research-config configs/research_industry_v4_v1_1.toml
 
 ```bash
 ashare-backtest run-model-backtest \
-  --scores-path research/models/latest_scores.parquet \
+  --scores-path research/models/walk_forward_scores.parquet \
   --storage-root storage \
   --start-date 2025-01-01 \
   --end-date 2025-12-31 \
@@ -111,23 +109,32 @@ ashare-backtest sync-tushare-benchmark --symbol 000300.SH --start 20240101 --end
 
 ## Web 控制台
 
-启动本地回测控制台：
+启动本地控制台：
 
 ```bash
 ashare-backtest-web
 ```
 
-当前控制台支持：
+当前控制台包含三个主要页面：
 
-- 从预设配置发起回测
-- 浏览结果目录和摘要指标
-- 查看带基准对比的权益曲线
-- 筛选和检查交易记录
-- 查看策略最新信号与模拟盘视图
+- `/`：数据看板，查看交易日历热力图、SQLite 数据源摘要和策略数量
+- `/backtest`：回测控制台，选择配置、分数文件和区间后直接发起回测
+- `/simulation`：模拟成交台，创建模拟账户、查看账户状态、执行历史和状态演化
+
+模拟页里 `strategy_state.json`、`decision_log.csv` 的 `decision_reason` 常见值包括：
+
+- `initial_entry`
+- `empty_universe`
+- `insufficient_history`
+- `rebalance_schedule`
+- `missing_scores`
+- `model_score_schedule`
+
+排查模拟结果时，可以优先看 `summary.decision_reason`，判断当前是正常调仓、沿用旧仓位，还是数据准备存在缺口。
 
 ## 当前推荐研究配置
 
-当前推荐直接使用 [`configs/research_industry_v4_v1_1.toml`](/Users/yongqiuwu/works/github/Trade/configs/research_industry_v4_v1_1.toml)：
+当前推荐使用 [`configs/research_industry_v4_v1_1.toml`](/Users/yongqiuwu/works/github/Trade/configs/research_industry_v4_v1_1.toml)：
 
 - 因子面板：`industry_v4`
 - 标签：`industry_excess_fwd_return_5`
@@ -136,7 +143,7 @@ ashare-backtest-web
 - 换手控制：`min_turnover_names=3`
 - 行业约束：`max_names_per_industry=2`
 
-当前默认把股票池门禁前置到 `universe` 层，再让因子构建读取指定 universe。导入后会生成两个快照池：
+默认会先在 `universe` 层做股票池门禁，再让因子构建读取指定 universe。导入后通常会维护两个快照池：
 
 - `all_active`：当前 active 股票
 - `tradable_core`：当前 active、非 ST、上市满 120 天，并满足基本可交易性和流动性过滤
@@ -145,6 +152,8 @@ ashare-backtest-web
 
 - [`docs/mvp.md`](/Users/yongqiuwu/works/github/Trade/docs/mvp.md)
 - [`docs/research-pipeline.md`](/Users/yongqiuwu/works/github/Trade/docs/research-pipeline.md)
+- [`docs/strategy-v1-1-premarket-runbook.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v1-1-premarket-runbook.md)
+- [`docs/strategy-v1-1-latest-active-data-source.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v1-1-latest-active-data-source.md)
 - [`docs/strategy-v2-live-readiness-checklist.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-live-readiness-checklist.md)
 - [`docs/strategy-v2-roadmap.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-roadmap.md)
 

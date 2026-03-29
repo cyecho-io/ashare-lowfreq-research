@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A-Share Data Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <nav class="topnav" aria-label="Global">
+        <a class="topnav-link active" href="/">数据看板</a>
+        <a class="topnav-link" href="/backtest">回测控制台</a>
+        <a class="topnav-link" href="/simulation">模拟成交台</a>
+      </nav>
+
+      <header class="hero">
+        <div>
+          <p class="eyebrow">A-Share Data Dashboard</p>
+          <h1>数据更新看板</h1>
+          <p class="subcopy">集中查看交易日历、策略数量、SQLite 股票覆盖和导入状态，先确认数据边界，再做回测或模拟。</p>
+        </div>
+        <div class="hero-meta">
+          <span class="pill">数据口径可见</span>
+          <span class="pill">交易日历热力图</span>
+          <span class="pill">SQLite 源库摘要</span>
+        </div>
+      </header>
+
+      <main class="dashboard-grid">
+        <section class="panel dashboard-summary-panel">
+          <div class="panel-head">
+            <h2>核心指标</h2>
+            <p id="dashboard-meta" class="muted">正在读取数据摘要。</p>
+          </div>
+          <div id="dashboard-summary-cards" class="summary-cards dashboard-summary-cards"></div>
+        </section>
+
+        <section class="panel dashboard-calendar-panel">
+          <div class="panel-head">
+            <h2>交易日历</h2>
+            <p>最近 140 天方格图。绿色为开市日，米色为休市日。</p>
+          </div>
+          <div class="dashboard-calendar-meta">
+            <span id="dashboard-calendar-range" class="muted"></span>
+            <span id="dashboard-calendar-counts" class="muted"></span>
+          </div>
+          <div id="dashboard-calendar-grid" class="calendar-heatmap" aria-label="Trading calendar heatmap"></div>
+          <div class="calendar-legend">
+            <span><i class="legend-swatch legend-open"></i>开市</span>
+            <span><i class="legend-swatch legend-closed"></i>休市</span>
+          </div>
+        </section>
+
+        <section class="panel dashboard-detail-panel">
+          <div class="panel-head">
+            <h2>数据源摘要</h2>
+            <p>当前 dashboard 读取的是最近一次导入链路使用的 SQLite 源库。</p>
+          </div>
+          <div id="dashboard-detail-list" class="detail-list dashboard-detail-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/dashboard.js"></script>
+  </body>
+</html>

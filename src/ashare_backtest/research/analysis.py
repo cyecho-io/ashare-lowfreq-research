@@ -8,10 +8,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from ashare_backtest.data import DataProvider, ParquetDataProvider
+from ashare_backtest.data import DataProvider, ParquetDataProvider, load_universe_symbols
 from ashare_backtest.engine import BacktestEngine
+from ashare_backtest.logging_utils import get_logger
 from ashare_backtest.protocol import AllocationDecision, BacktestConfig, Position, StrategyContext, Trade
 from ashare_backtest.research.score_strategy import ScoreStrategyConfig, ScoreTopKStrategy
+
+LOGGER = get_logger("research.analysis")
 
 
 @dataclass(frozen=True)
@@ -49,11 +52,15 @@ class RiskExposureConfig:
 
 
 @dataclass(frozen=True)
-class PremarketReferenceConfig:
+class StartDateRobustnessConfig:
     scores_path: str
     storage_root: str
     output_path: str
-    trade_date: str
+    analysis_start_date: str
+    analysis_end_date: str
+    holding_months: int = 8
+    cadence: str = "monthly"
+    universe_name: str = ""
     top_k: int = 5
     rebalance_every: int = 3
     lookback_window: int = 20
@@ -61,6 +68,49 @@ class PremarketReferenceConfig:
     keep_buffer: int = 2
     min_turnover_names: int = 2
     min_daily_amount: float = 0.0
+    max_close_price: float = 0.0
+    max_names_per_industry: int = 0
+    max_position_weight: float = 0.0
+    exit_policy: str = "buffered_rank"
+    grace_rank_buffer: int = 0
+    grace_momentum_window: int = 3
+    grace_min_return: float = 0.0
+    trailing_stop_window: int = 10
+    trailing_stop_drawdown: float = 0.12
+    trailing_stop_min_gain: float = 0.15
+    score_reversal_confirm_days: int = 3
+    score_reversal_threshold: float = 0.0
+    hybrid_price_window: int = 5
+    hybrid_price_threshold: float = 0.0
+    strong_keep_extra_buffer: int = 0
+    strong_keep_momentum_window: int = 5
+    strong_keep_min_return: float = 0.0
+    strong_trim_slowdown: float = 0.0
+    strong_trim_momentum_window: int = 5
+    strong_trim_min_return: float = 0.0
+    initial_cash: float = 1_000_000.0
+    commission_rate: float = 0.0003
+    stamp_tax_rate: float = 0.001
+    slippage_rate: float = 0.0005
+    max_trade_participation_rate: float = 0.0
+    max_pending_days: int = 0
+
+
+@dataclass(frozen=True)
+class PremarketReferenceConfig:
+    scores_path: str
+    storage_root: str
+    output_path: str
+    trade_date: str
+    universe_name: str = ""
+    top_k: int = 5
+    rebalance_every: int = 3
+    lookback_window: int = 20
+    min_hold_bars: int = 5
+    keep_buffer: int = 2
+    min_turnover_names: int = 2
+    min_daily_amount: float = 0.0
+    max_close_price: float = 0.0
     max_names_per_industry: int = 0
     max_position_weight: float = 0.0
     exit_policy: str = "buffered_rank"
@@ -92,6 +142,7 @@ class PremarketReferenceConfig:
 class StrategyStateConfig(PremarketReferenceConfig):
     mode: str = "continue"
     previous_state_path: str = ""
+    simulate_trade_execution: bool = True
 
 
 def _build_score_strategy(config: PremarketReferenceConfig) -> ScoreTopKStrategy:
@@ -106,6 +157,7 @@ def _build_score_strategy(config: PremarketReferenceConfig) -> ScoreTopKStrategy
             keep_buffer=config.keep_buffer,
             min_turnover_names=config.min_turnover_names,
             min_daily_amount=config.min_daily_amount,
+            max_close_price=config.max_close_price,
             max_names_per_industry=config.max_names_per_industry,
             max_position_weight=config.max_position_weight,
             exit_policy=config.exit_policy,
@@ -144,6 +196,36 @@ def _build_backtest_config(config: PremarketReferenceConfig, universe: tuple[str
     )
 
 
+def _resolve_score_universe(
+    config: PremarketReferenceConfig,
+    scores: pd.DataFrame,
+    *,
+    as_of_date: date,
+) -> tuple[str, ...]:
+    score_symbols = tuple(sorted(scores["symbol"].astype(str).unique().tolist()))
+    if not config.universe_name:
+        return score_symbols
+
+    allowed_symbols = set(
+        load_universe_symbols(
+            config.storage_root,
+            config.universe_name,
+            as_of_date=as_of_date.isoformat(),
+        )
+    )
+    if not allowed_symbols:
+        raise ValueError(
+            f"universe {config.universe_name} has no members on {as_of_date.isoformat()}"
+        )
+
+    filtered = tuple(symbol for symbol in score_symbols if symbol in allowed_symbols)
+    if not filtered:
+        raise ValueError(
+            f"scores parquet has no symbols in universe {config.universe_name} on {as_of_date.isoformat()}"
+        )
+    return filtered
+
+
 def _serialize_positions(positions: dict[str, Position], portfolio_value: float) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for symbol in sorted(positions):
@@ -179,6 +261,79 @@ def _serialize_pending_orders(
             }
         )
     return rows
+
+
+def _annotate_action_execution(
+    *,
+    actions: list[dict[str, object]],
+    trade_log: list[Trade],
+    trade_date: date,
+    portfolio_value: float,
+    should_rebalance: bool,
+) -> None:
+    trade_index: dict[tuple[str, str], list[Trade]] = {}
+    for trade in trade_log:
+        if trade.trade_date != trade_date:
+            continue
+        trade_index.setdefault((trade.symbol, trade.side), []).append(trade)
+
+    for action in actions:
+        action_name = str(action.get("action") or "").upper()
+        current_quantity = int(action.get("current_quantity") or 0)
+        target_weight = float(action.get("target_weight") or 0.0)
+        next_open = float(action.get("next_open") or 0.0)
+
+        if not should_rebalance:
+            action["planned_quantity"] = 0
+            action["executed_quantity"] = 0
+            action["would_trade"] = False
+            action["execution_status"] = "not_rebalanced"
+            action["execution_reason"] = "rebalance_not_triggered"
+            continue
+
+        if action_name not in {"BUY", "ADD", "SELL", "TRIM"}:
+            action["planned_quantity"] = 0
+            action["executed_quantity"] = 0
+            action["would_trade"] = False
+            action["execution_status"] = "already_at_target"
+            action["execution_reason"] = "no_order_needed"
+            continue
+
+        side = "BUY" if action_name in {"BUY", "ADD"} else "SELL"
+        planned_quantity = 0
+        if next_open > 0:
+            target_value = portfolio_value * target_weight
+            current_value = current_quantity * next_open
+            delta_value = target_value - current_value
+            if abs(delta_value) >= next_open * 100:
+                raw_quantity = int(abs(delta_value) / next_open)
+                planned_quantity = (raw_quantity // 100) * 100
+                if side == "SELL":
+                    planned_quantity = min(planned_quantity, current_quantity)
+
+        related_trades = trade_index.get((str(action.get("symbol") or ""), side), [])
+        executed_quantity = sum(int(trade.quantity) for trade in related_trades if trade.status == "filled")
+        rejected_reasons = [str(trade.reason) for trade in related_trades if trade.status != "filled"]
+
+        action["planned_quantity"] = planned_quantity
+        action["executed_quantity"] = executed_quantity
+        action["would_trade"] = executed_quantity > 0
+
+        if executed_quantity > 0 and planned_quantity > executed_quantity:
+            action["execution_status"] = "partially_executed"
+            action["execution_reason"] = "partially_filled"
+        elif executed_quantity > 0:
+            action["execution_status"] = "executed"
+            action["execution_reason"] = "filled"
+        elif planned_quantity <= 0:
+            action["execution_status"] = "below_round_lot"
+            action["execution_reason"] = "below_100_share_lot"
+        elif rejected_reasons:
+            action["execution_status"] = "rejected"
+            action["execution_reason"] = ",".join(sorted(set(rejected_reasons)))
+        else:
+            action["execution_status"] = "not_executed"
+            action["execution_reason"] = "no_fill"
 
 
 def _write_trade_log(path: Path, trades: list[Trade]) -> None:
@@ -311,17 +466,10 @@ def generate_premarket_reference(
         raise ValueError("scores parquet is empty")
 
     scores["trade_date"] = pd.to_datetime(scores["trade_date"])
-    universe = tuple(sorted(scores["symbol"].astype(str).unique().tolist()))
     provider = provider or ParquetDataProvider(config.storage_root)
     strategy = _build_score_strategy(config)
 
     earliest_score_date = scores["trade_date"].min().date()
-    provider.preload(
-        symbols=universe,
-        start_date=earliest_score_date,
-        end_date=target_trade_date,
-        lookback=strategy.metadata.lookback_window,
-    )
     trade_dates = provider.get_trade_dates(earliest_score_date, target_trade_date)
     if target_trade_date not in trade_dates:
         raise ValueError(f"trade date is not an open trading day: {config.trade_date}")
@@ -329,6 +477,13 @@ def generate_premarket_reference(
     if target_index == 0:
         raise ValueError("cannot build premarket reference for the first available trade date")
     signal_date = trade_dates[target_index - 1]
+    universe = _resolve_score_universe(config, scores, as_of_date=signal_date)
+    provider.preload(
+        symbols=universe,
+        start_date=earliest_score_date,
+        end_date=target_trade_date,
+        lookback=strategy.metadata.lookback_window,
+    )
 
     engine = BacktestEngine(provider)
     cash = config.initial_cash
@@ -519,30 +674,50 @@ def generate_strategy_state(
     config: StrategyStateConfig,
     provider: DataProvider | None = None,
 ) -> dict[str, object]:
+    LOGGER.info(
+        "generate strategy state start output=%s mode=%s trade_date=%s scores_path=%s universe_name=%s previous_state=%s",
+        config.output_path,
+        config.mode,
+        config.trade_date,
+        config.scores_path,
+        config.universe_name or "-",
+        config.previous_state_path or "-",
+    )
     target_trade_date = date.fromisoformat(config.trade_date)
     scores = pd.read_parquet(config.scores_path).sort_values(["trade_date", "symbol"])
     if scores.empty:
         raise ValueError("scores parquet is empty")
 
     scores["trade_date"] = pd.to_datetime(scores["trade_date"])
-    universe = tuple(sorted(scores["symbol"].astype(str).unique().tolist()))
     provider = provider or ParquetDataProvider(config.storage_root)
     strategy = _build_score_strategy(config)
 
     earliest_score_date = scores["trade_date"].min().date()
-    provider.preload(
-        symbols=universe,
-        start_date=earliest_score_date,
-        end_date=target_trade_date,
-        lookback=strategy.metadata.lookback_window,
-    )
-    trade_dates = provider.get_trade_dates(earliest_score_date, target_trade_date)
+    previous_state: dict[str, object] | None = None
+    replay_start_date = earliest_score_date
+    if config.mode in {"continue", "historical"} and config.previous_state_path:
+        previous_state = _load_strategy_state(config.previous_state_path)
+        replay_start_date = min(replay_start_date, previous_state["as_of_trade_date"])
+    trade_dates = provider.get_trade_dates(replay_start_date, target_trade_date)
     if target_trade_date not in trade_dates:
         raise ValueError(f"trade date is not an open trading day: {config.trade_date}")
     target_index = trade_dates.index(target_trade_date)
     if target_index == 0:
         raise ValueError("cannot build strategy state for the first available trade date")
     signal_date = trade_dates[target_index - 1]
+    universe = _resolve_score_universe(config, scores, as_of_date=signal_date)
+    LOGGER.info(
+        "generate strategy state resolved signal_date=%s universe_size=%s target_trade_date=%s",
+        signal_date.isoformat(),
+        len(universe),
+        target_trade_date.isoformat(),
+    )
+    provider.preload(
+        symbols=universe,
+        start_date=replay_start_date,
+        end_date=target_trade_date,
+        lookback=strategy.metadata.lookback_window,
+    )
 
     engine = BacktestEngine(provider)
     last_allocation = AllocationDecision(target_weights={}, note="no_prior_allocation")
@@ -553,6 +728,7 @@ def generate_strategy_state(
     model_context: StrategyContext | None = None
     current_pending_orders: dict[tuple[str, str], BacktestEngine._PendingOrder] = {}
     should_rebalance_on_target = False
+    target_rebalance_already_executed = False
     trade_log: list[Trade] = []
     decision_log: list[dict[str, object]] = []
 
@@ -593,8 +769,8 @@ def generate_strategy_state(
         if config.mode not in {"continue", "historical"}:
             raise ValueError(f"unsupported strategy state mode: {config.mode}")
 
-        if config.previous_state_path:
-            state = _load_strategy_state(config.previous_state_path)
+        if previous_state is not None:
+            state = previous_state
             start_index = trade_dates.index(state["as_of_trade_date"]) + (0 if state["execution_pending"] else 1)
             if start_index > target_index:
                 raise ValueError("target trade date must be after previous strategy state date")
@@ -652,6 +828,7 @@ def generate_strategy_state(
                     current_bars=current_bars,
                 )
                 strategy._last_rebalance_date = trade_date_item
+                target_rebalance_already_executed = trade_date_item == target_trade_date
                 bootstrap_allocation = None
                 if trade_date_item != target_trade_date:
                     continue
@@ -800,7 +977,7 @@ def generate_strategy_state(
                 }
             )
 
-    if should_rebalance_on_target:
+    if should_rebalance_on_target and config.simulate_trade_execution and not target_rebalance_already_executed:
         has_trade_day_bars = any(bar is not None for bar in current_bars.values())
         if has_trade_day_bars:
             next_cash, next_positions, next_fill_trades, _ = engine._execute_rebalance(
@@ -830,6 +1007,29 @@ def generate_strategy_state(
             planned_target_weights = {
                 symbol: round(float(weight), 6) for symbol, weight in sorted(last_allocation.target_weights.items())
             }
+    elif should_rebalance_on_target and target_rebalance_already_executed:
+        next_cash = model_cash
+        next_positions = dict(model_positions)
+        next_pending_orders = dict(current_pending_orders)
+        execution_pending = bool(next_pending_orders)
+        next_last_rebalance_date = strategy._last_rebalance_date
+        planned_target_weights = (
+            {
+                symbol: round(float(weight), 6)
+                for symbol, weight in sorted(last_allocation.target_weights.items())
+            }
+            if execution_pending
+            else {}
+        )
+    elif should_rebalance_on_target:
+        next_cash = model_cash
+        next_positions = dict(model_positions)
+        next_pending_orders = dict(current_pending_orders)
+        execution_pending = True
+        next_last_rebalance_date = None
+        planned_target_weights = {
+            symbol: round(float(weight), 6) for symbol, weight in sorted(last_allocation.target_weights.items())
+        }
     else:
         next_cash = model_cash
         next_positions = dict(model_positions)
@@ -837,6 +1037,14 @@ def generate_strategy_state(
         execution_pending = False
         next_last_rebalance_date = strategy._last_rebalance_date
         planned_target_weights = {}
+
+    _annotate_action_execution(
+        actions=actions,
+        trade_log=trade_log,
+        trade_date=target_trade_date,
+        portfolio_value=portfolio_value,
+        should_rebalance=should_rebalance_on_target,
+    )
 
     next_portfolio_value = next_cash + sum(position.quantity * position.last_price for position in next_positions.values())
     summary = {
@@ -895,6 +1103,15 @@ def generate_strategy_state(
     target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     _write_trade_log(target.with_name("trades.csv"), trade_log)
     _write_decision_log(target.with_name("decision_log.csv"), decision_log)
+    LOGGER.info(
+        "generate strategy state complete output=%s mode=%s decision_reason=%s selected=%s current_positions=%s target_positions=%s",
+        target.as_posix(),
+        config.mode,
+        summary["decision_reason"],
+        len(payload["plan"]["selected_symbols"]),
+        summary["current_position_count"],
+        summary["target_position_count"],
+    )
     return payload
 
 
@@ -1025,6 +1242,147 @@ def compare_backtest_monthly_returns(config: MonthlyComparisonConfig) -> dict[st
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return payload
+
+
+def analyze_start_date_robustness(
+    config: StartDateRobustnessConfig,
+    provider: DataProvider | None = None,
+) -> dict[str, object]:
+    scores = pd.read_parquet(config.scores_path).sort_values(["trade_date", "symbol"])
+    if scores.empty:
+        raise ValueError("scores parquet is empty")
+
+    analysis_start_date = date.fromisoformat(config.analysis_start_date)
+    analysis_end_date = date.fromisoformat(config.analysis_end_date)
+    if analysis_end_date < analysis_start_date:
+        raise ValueError("analysis_end_date must be on or after analysis_start_date")
+    if config.holding_months <= 0:
+        raise ValueError("holding_months must be positive")
+    if config.cadence not in {"daily", "monthly"}:
+        raise ValueError("cadence must be one of: daily, monthly")
+
+    scores["trade_date"] = pd.to_datetime(scores["trade_date"])
+    provider = provider or ParquetDataProvider(config.storage_root)
+    strategy = _build_score_strategy(config)
+
+    earliest_score_date = scores["trade_date"].min().date()
+    latest_score_date = scores["trade_date"].max().date()
+    candidate_end = min(analysis_end_date, latest_score_date)
+    if candidate_end < analysis_start_date:
+        raise ValueError("analysis window falls outside score coverage")
+
+    trade_dates = provider.get_trade_dates(earliest_score_date, candidate_end)
+    candidate_trade_dates = [item for item in trade_dates if analysis_start_date <= item <= candidate_end]
+    if not candidate_trade_dates:
+        raise ValueError("no open trade dates within analysis window")
+
+    sample_anchor_date = candidate_trade_dates[0]
+    universe = _resolve_score_universe(config, scores, as_of_date=sample_anchor_date)
+    provider.preload(
+        symbols=universe,
+        start_date=earliest_score_date,
+        end_date=candidate_end,
+        lookback=strategy.metadata.lookback_window,
+    )
+
+    sampled_starts = _sample_robustness_start_dates(candidate_trade_dates, config.cadence)
+    result_rows: list[dict[str, object]] = []
+    engine = BacktestEngine(provider)
+
+    for start_trade_date in sampled_starts:
+        end_trade_date = _resolve_robustness_end_date(candidate_trade_dates, start_trade_date, config.holding_months)
+        if end_trade_date is None or end_trade_date <= start_trade_date:
+            continue
+
+        run_strategy = _build_score_strategy(config)
+        backtest = BacktestConfig(
+            strategy_path="__model_score__",
+            start_date=start_trade_date,
+            end_date=end_trade_date,
+            universe=universe,
+            initial_cash=config.initial_cash,
+            commission_rate=config.commission_rate,
+            stamp_tax_rate=config.stamp_tax_rate,
+            slippage_rate=config.slippage_rate,
+            max_trade_participation_rate=config.max_trade_participation_rate,
+            max_pending_days=config.max_pending_days,
+        )
+        result = engine.run_with_strategy(backtest, run_strategy)
+        result_rows.append(
+            {
+                "start_date": start_trade_date.isoformat(),
+                "end_date": end_trade_date.isoformat(),
+                "trade_days": len(result.equity_curve),
+                "total_return": float(result.total_return),
+                "annual_return": float(result.annual_return),
+                "max_drawdown": float(result.max_drawdown),
+                "sharpe_ratio": float(result.sharpe_ratio),
+                "turnover_ratio": float(result.turnover_ratio),
+                "filled_trade_count": int(result.filled_trade_count),
+                "rejected_trade_count": int(result.rejected_trade_count),
+            }
+        )
+
+    if not result_rows:
+        raise ValueError("no valid robustness windows were generated")
+
+    frame = pd.DataFrame(result_rows)
+    best = frame.loc[frame["total_return"].idxmax()]
+    worst = frame.loc[frame["total_return"].idxmin()]
+    payload = {
+        "summary": {
+            "analysis_start_date": analysis_start_date.isoformat(),
+            "analysis_end_date": candidate_end.isoformat(),
+            "holding_months": int(config.holding_months),
+            "cadence": config.cadence,
+            "sample_count": int(len(frame)),
+            "mean_total_return": float(frame["total_return"].mean()),
+            "median_total_return": float(frame["total_return"].median()),
+            "min_total_return": float(frame["total_return"].min()),
+            "max_total_return": float(frame["total_return"].max()),
+            "win_rate": float((frame["total_return"] > 0).mean()),
+            "mean_max_drawdown": float(frame["max_drawdown"].mean()),
+            "best_start_date": str(best["start_date"]),
+            "best_total_return": float(best["total_return"]),
+            "worst_start_date": str(worst["start_date"]),
+            "worst_total_return": float(worst["total_return"]),
+        },
+        "by_start_date": result_rows,
+    }
+
+    target = Path(config.output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return payload
+
+
+def _sample_robustness_start_dates(trade_dates: list[date], cadence: str) -> list[date]:
+    if cadence == "daily":
+        return list(trade_dates)
+    sampled: list[date] = []
+    seen_months: set[str] = set()
+    for trade_date_item in trade_dates:
+        month_key = trade_date_item.strftime("%Y-%m")
+        if month_key in seen_months:
+            continue
+        sampled.append(trade_date_item)
+        seen_months.add(month_key)
+    return sampled
+
+
+def _resolve_robustness_end_date(
+    trade_dates: list[date],
+    start_trade_date: date,
+    holding_months: int,
+) -> date | None:
+    anchor = (pd.Timestamp(start_trade_date) + pd.DateOffset(months=holding_months)).date()
+    eligible = [item for item in trade_dates if item >= anchor]
+    if not eligible:
+        return None
+    end_trade_date = eligible[0]
+    if end_trade_date <= start_trade_date:
+        return None
+    return end_trade_date
 
 
 def analyze_monthly_risk_exposures(config: RiskExposureConfig) -> dict[str, object]:

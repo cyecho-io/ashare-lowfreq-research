@@ -113,43 +113,43 @@ export TUSHARE_TOKEN=your_token
 
 为例。
 
-### 2. 构建最新因子面板
+### 2. 构建信号日 factor snapshot
 
 ```bash
 ./.venv/bin/ashare-backtest build-factors \
   --storage-root storage \
+  --factor-spec-id research_industry_v4_v1_1 \
   --universe-name tradable_core \
-  --output-path research/factors/full_factor_panel_industry_v4_v1_1_latest.parquet \
   --start-date 2024-01-02 \
-  --end-date 2026-03-25
+  --as-of-date 2026-03-25
 ```
 
 输出文件：
 
-- [full_factor_panel_industry_v4_v1_1_latest.parquet](/Users/yongqiuwu/works/github/Trade/research/factors/full_factor_panel_industry_v4_v1_1_latest.parquet)
+- [asof_2026-03-25.parquet](/Users/yongqiuwu/works/github/Trade/research/factors/research_industry_v4_v1_1/tradable_core/start_2024-01-02/asof_2026-03-25.parquet)
 
-### 3. 训练最新模型并对信号日打分
+### 3. 用 walk_forward 窗口对信号日打分
 
 ```bash
-./.venv/bin/ashare-backtest train-lgbm-latest-inference \
-  --factor-panel-path research/factors/full_factor_panel_industry_v4_v1_1_latest.parquet \
+./.venv/bin/ashare-backtest train-lgbm-walk-forward-as-of-date \
+  --factor-panel-path research/factors/research_industry_v4_v1_1/tradable_core/start_2024-01-02/asof_2026-03-25.parquet \
   --label-column industry_excess_fwd_return_5 \
   --train-window-months 12 \
-  --inference-date 2026-03-25 \
-  --output-scores-path research/models/latest_scores_industry_v4_v1_1_2026-03-25.parquet \
-  --output-metrics-path research/models/latest_metrics_industry_v4_v1_1_2026-03-25.json
+  --as-of-date 2026-03-25 \
+  --output-scores-path research/models/walk_forward_scores_industry_v4_v1_1_2026-03-25.parquet \
+  --output-metrics-path research/models/walk_forward_metrics_industry_v4_v1_1_2026-03-25.json
 ```
 
 输出文件：
 
-- [latest_scores_industry_v4_v1_1_2026-03-25.parquet](/Users/yongqiuwu/works/github/Trade/research/models/latest_scores_industry_v4_v1_1_2026-03-25.parquet)
-- [latest_metrics_industry_v4_v1_1_2026-03-25.json](/Users/yongqiuwu/works/github/Trade/research/models/latest_metrics_industry_v4_v1_1_2026-03-25.json)
+- [walk_forward_scores_industry_v4_v1_1_2026-03-25.parquet](/Users/yongqiuwu/works/github/Trade/research/models/walk_forward_scores_industry_v4_v1_1_2026-03-25.parquet)
+- [walk_forward_metrics_industry_v4_v1_1_2026-03-25.json](/Users/yongqiuwu/works/github/Trade/research/models/walk_forward_metrics_industry_v4_v1_1_2026-03-25.json)
 
 ### 4. 生成下一交易日盘前调仓参考
 
 ```bash
 ./.venv/bin/ashare-backtest generate-premarket-reference \
-  --scores-path research/models/latest_scores_industry_v4_v1_1_2026-03-25.parquet \
+  --scores-path research/models/walk_forward_scores_industry_v4_v1_1_2026-03-25.parquet \
   --storage-root storage \
   --trade-date 2026-03-26 \
   --top-k 6 \
@@ -201,21 +201,21 @@ export TUSHARE_TOKEN=your_token
 
 ./.venv/bin/ashare-backtest build-factors \
   --storage-root storage \
+  --factor-spec-id research_industry_v4_v1_1 \
   --universe-name tradable_core \
-  --output-path research/factors/full_factor_panel_industry_v4_v1_1_latest.parquet \
   --start-date 2024-01-02 \
-  --end-date T
+  --as-of-date T
 
-./.venv/bin/ashare-backtest train-lgbm-latest-inference \
-  --factor-panel-path research/factors/full_factor_panel_industry_v4_v1_1_latest.parquet \
+./.venv/bin/ashare-backtest train-lgbm-walk-forward-as-of-date \
+  --factor-panel-path research/factors/research_industry_v4_v1_1/tradable_core/start_2024-01-02/asof_T.parquet \
   --label-column industry_excess_fwd_return_5 \
   --train-window-months 12 \
-  --inference-date T \
-  --output-scores-path research/models/latest_scores_industry_v4_v1_1_T.parquet \
-  --output-metrics-path research/models/latest_metrics_industry_v4_v1_1_T.json
+  --as-of-date T \
+  --output-scores-path research/models/walk_forward_scores_industry_v4_v1_1_T.parquet \
+  --output-metrics-path research/models/walk_forward_metrics_industry_v4_v1_1_T.json
 
 ./.venv/bin/ashare-backtest generate-premarket-reference \
-  --scores-path research/models/latest_scores_industry_v4_v1_1_T.parquet \
+  --scores-path research/models/walk_forward_scores_industry_v4_v1_1_T.parquet \
   --storage-root storage \
   --trade-date T+1 \
   --top-k 6 \

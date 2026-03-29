@@ -125,6 +125,128 @@ def test_allocate_does_not_keep_stale_position_under_turnover_floor(tmp_path) ->
     assert "CCC" not in allocation.target_weights
 
 
+def test_select_filters_out_symbols_below_liquidity_threshold(tmp_path) -> None:
+    scores_path, storage_root = _write_inputs(
+        tmp_path,
+        [
+            ("AAA", 0.90),
+            ("BBB", 0.80),
+            ("CCC", 0.70),
+        ],
+    )
+    strategy = ScoreTopKStrategy(
+        ScoreStrategyConfig(
+            scores_path=scores_path,
+            storage_root=storage_root,
+            top_k=2,
+            min_daily_amount=500_000.0,
+        )
+    )
+    context = StrategyContext(
+        trade_date=date(2025, 1, 13),
+        universe=("AAA", "BBB", "CCC"),
+        bars={
+            "AAA": _history("AAA", [10.0, 10.1, 10.2]),
+            "BBB": _history("BBB", [10.0, 10.0, 10.0]),
+            "CCC": _history("CCC", [10.0, 10.0, 10.0]),
+        },
+        positions={},
+        cash=0.0,
+    )
+    context.bars["BBB"][-1] = Bar(
+        symbol="BBB",
+        trade_date=context.bars["BBB"][-1].trade_date,
+        open=10.0,
+        high=10.0,
+        low=10.0,
+        close=10.0,
+        amount=300_000.0,
+    )
+
+    selected = strategy.select(context)
+
+    assert "AAA" in selected
+    assert "BBB" not in selected
+
+
+def test_select_filters_out_symbols_above_price_cap(tmp_path) -> None:
+    scores_path, storage_root = _write_inputs(
+        tmp_path,
+        [
+            ("AAA", 0.90),
+            ("BBB", 0.80),
+            ("CCC", 0.70),
+        ],
+    )
+    strategy = ScoreTopKStrategy(
+        ScoreStrategyConfig(
+            scores_path=scores_path,
+            storage_root=storage_root,
+            top_k=2,
+            max_close_price=50.0,
+        )
+    )
+    context = StrategyContext(
+        trade_date=date(2025, 1, 13),
+        universe=("AAA", "BBB", "CCC"),
+        bars={
+            "AAA": _history("AAA", [10.0, 10.1, 10.2]),
+            "BBB": _history("BBB", [60.0, 60.0, 60.0]),
+            "CCC": _history("CCC", [10.0, 10.0, 10.0]),
+        },
+        positions={},
+        cash=0.0,
+    )
+
+    selected = strategy.select(context)
+
+    assert "AAA" in selected
+    assert "BBB" not in selected
+
+
+def test_select_filters_out_st_symbols_even_when_they_have_top_scores(tmp_path) -> None:
+    scores_path = tmp_path / "scores.parquet"
+    pd.DataFrame(
+        [
+            {"trade_date": "2025-01-08", "symbol": "AAA", "prediction": 0.95},
+            {"trade_date": "2025-01-08", "symbol": "BBB", "prediction": 0.90},
+            {"trade_date": "2025-01-08", "symbol": "CCC", "prediction": 0.80},
+        ]
+    ).to_parquet(scores_path, index=False)
+    instruments_path = tmp_path / "storage" / "parquet" / "instruments" / "ashare_instruments.parquet"
+    instruments_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {"symbol": "AAA", "industry_level_1": "industry_0", "is_st": True},
+            {"symbol": "BBB", "industry_level_1": "industry_1", "is_st": False},
+            {"symbol": "CCC", "industry_level_1": "industry_2", "is_st": False},
+        ]
+    ).to_parquet(instruments_path, index=False)
+
+    strategy = ScoreTopKStrategy(
+        ScoreStrategyConfig(
+            scores_path=scores_path.as_posix(),
+            storage_root=(tmp_path / "storage").as_posix(),
+            top_k=2,
+        )
+    )
+    context = StrategyContext(
+        trade_date=date(2025, 1, 13),
+        universe=("AAA", "BBB", "CCC"),
+        bars={
+            "AAA": _history("AAA", [10.0, 10.1, 10.2]),
+            "BBB": _history("BBB", [10.0, 10.1, 10.2]),
+            "CCC": _history("CCC", [10.0, 10.1, 10.2]),
+        },
+        positions={},
+        cash=0.0,
+    )
+
+    selected = strategy.select(context)
+
+    assert selected == ["BBB", "CCC"]
+
+
 def test_rank_momentum_grace_exits_when_rank_and_momentum_both_break(tmp_path) -> None:
     scores_path, storage_root = _write_inputs(
         tmp_path,

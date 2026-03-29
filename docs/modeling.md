@@ -19,11 +19,11 @@
 
 ```text
 research/models/
-├── latest_scores.parquet
-└── latest_metrics.json
+├── walk_forward_scores.parquet
+└── walk_forward_metrics.json
 ```
 
 其中：
 
-- `latest_scores.parquet` 包含 `trade_date`、`symbol`、`prediction`
-- `latest_metrics.json` 包含训练参数和简单误差指标
+- `walk_forward_scores.parquet` 包含 `trade_date`、`symbol`、`prediction`
+- `walk_forward_metrics.json` 包含训练参数和简单误差指标

@@ -8,7 +8,8 @@ ENV_FILE="$ROOT_DIR/.env"
 
 SQLITE_PATH="storage/source/ashare_arena_sync.db"
 STORAGE_ROOT="storage"
-FACTOR_OUTPUT="research/factors/full_factor_panel_industry_v4_v1_1_latest.parquet"
+FACTOR_OUTPUT_DIR="research/factors/research_industry_v4_v1_1/tradable_core/start_2024-01-02"
+FACTOR_OUTPUT=""
 SIGNAL_DATE=""
 TRADE_DATE=""
 FORCE_SYNC=0
@@ -31,7 +32,7 @@ Options:
   --force-sync               强制执行 Tushare -> SQLite 同步
   --force-import             强制执行 SQLite -> Parquet 刷新
   --force-factors            强制重建因子面板
-  --force-inference          强制重跑 latest inference
+  --force-inference          强制重跑信号日 walk_forward 打分
   --force-premarket          强制重建盘前参考文件
   -h, --help                 查看帮助
 EOF
@@ -352,41 +353,43 @@ if [[ -z "$TRADE_DATE" ]]; then
   echo "Auto-selected trade date: $TRADE_DATE"
 fi
 
+FACTOR_OUTPUT="${FACTOR_OUTPUT_DIR}/asof_${SIGNAL_DATE}.parquet"
+
 CURRENT_FACTOR_MAX="$(factor_max_date)"
 show_step "Check" "Current factor panel max trade_date: ${CURRENT_FACTOR_MAX:-<empty>}"
 
 if [[ "$FORCE_FACTORS" -eq 1 || -z "$CURRENT_FACTOR_MAX" || "$CURRENT_FACTOR_MAX" != "$SIGNAL_DATE" ]]; then
-  show_step "Factors" "Building latest factor panel"
+  show_step "Factors" "Building signal-date factor snapshot"
   run_cmd "$CLI" build-factors \
     --storage-root "$STORAGE_ROOT" \
     --universe-name tradable_core \
     --output-path "$FACTOR_OUTPUT" \
     --start-date 2024-01-02 \
-    --end-date "$SIGNAL_DATE"
+    --as-of-date "$SIGNAL_DATE"
   CURRENT_FACTOR_MAX="$(factor_max_date)"
   echo "Factor panel max trade_date after build: $CURRENT_FACTOR_MAX"
 else
   show_step "Skip" "Factor panel already up to date"
 fi
 
-SCORES_PATH="research/models/latest_scores_industry_v4_v1_1_${SIGNAL_DATE}.parquet"
-METRICS_PATH="research/models/latest_metrics_industry_v4_v1_1_${SIGNAL_DATE}.json"
+SCORES_PATH="research/models/walk_forward_scores_industry_v4_v1_1_${SIGNAL_DATE}.parquet"
+METRICS_PATH="research/models/walk_forward_metrics_industry_v4_v1_1_${SIGNAL_DATE}.json"
 CURRENT_SCORES_MAX="$(scores_max_date "$SCORES_PATH")"
-show_step "Check" "Current latest score file: $SCORES_PATH max trade_date=${CURRENT_SCORES_MAX:-<empty>}"
+show_step "Check" "Current walk-forward score file: $SCORES_PATH max trade_date=${CURRENT_SCORES_MAX:-<empty>}"
 
 if [[ "$FORCE_INFERENCE" -eq 1 || ! -f "$SCORES_PATH" || "$CURRENT_SCORES_MAX" != "$SIGNAL_DATE" ]]; then
-  show_step "Inference" "Running latest model inference"
-  run_cmd "$CLI" train-lgbm-latest-inference \
+  show_step "Scores" "Running walk-forward as-of-date scoring"
+  run_cmd "$CLI" train-lgbm-walk-forward-as-of-date \
     --factor-panel-path "$FACTOR_OUTPUT" \
     --label-column industry_excess_fwd_return_5 \
     --train-window-months 12 \
-    --inference-date "$SIGNAL_DATE" \
+    --as-of-date "$SIGNAL_DATE" \
     --output-scores-path "$SCORES_PATH" \
     --output-metrics-path "$METRICS_PATH"
   CURRENT_SCORES_MAX="$(scores_max_date "$SCORES_PATH")"
-  echo "Score file max trade_date after inference: $CURRENT_SCORES_MAX"
+  echo "Score file max trade_date after scoring: $CURRENT_SCORES_MAX"
 else
-  show_step "Skip" "Latest score file already up to date"
+  show_step "Skip" "Walk-forward score file already up to date"
 fi
 
 PREMARKET_PATH="research/models/premarket_reference_industry_v4_v1_1_${TRADE_DATE}.json"

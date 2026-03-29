@@ -1,10 +1,15 @@
 [storage]
 root = "storage"
 
-[factors]
-output_path = "research/factors/full_factor_panel_v3_run.parquet"
+[factor_spec]
+id = "research_excess_v3"
 start_date = "2024-01-02"
-end_date = "2026-03-10"
+
+[research_snapshot]
+as_of_date = "2026-03-10"
+
+[factors]
+output_path = "research/factors/research_excess_v3/start_2024-01-02/asof_2026-03-10.parquet"
 
 [training]
 label_column = "excess_fwd_return_5"
@@ -27,7 +32,7 @@ lookback_window = 20
 min_hold_bars = 5
 keep_buffer = 2
 min_turnover_names = 3
-initial_cash = 1000000
+initial_cash = 100000
 commission_rate = 0.0003
 stamp_tax_rate = 0.001
 slippage_rate = 0.0005

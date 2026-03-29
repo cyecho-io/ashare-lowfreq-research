@@ -1,2 +1,0 @@
-top_k,rebalance_every,min_hold_bars,total_return,annual_return,max_drawdown,sharpe_ratio,turnover_ratio,trade_count
-5,3,12,0.3606405595343021,0.5959973605302584,0.11313071480663528,2.0070815476482298,33.965672209,620

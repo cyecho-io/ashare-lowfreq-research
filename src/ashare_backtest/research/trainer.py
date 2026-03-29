@@ -6,6 +6,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from ashare_backtest.logging_utils import get_logger
+
+
+LOGGER = get_logger("research.trainer")
+
 
 DEFAULT_FEATURE_COLUMNS = [
     "mom_5",
@@ -79,6 +84,37 @@ class LatestInferenceConfig:
     min_data_in_leaf: int = 20
 
 
+@dataclass(frozen=True)
+class WalkForwardAsOfDateConfig:
+    factor_panel_path: str
+    output_scores_path: str
+    output_metrics_path: str
+    label_column: str = "fwd_return_5"
+    as_of_date: str | None = None
+    train_window_months: int = 12
+    feature_columns: tuple[str, ...] = tuple(DEFAULT_FEATURE_COLUMNS)
+    num_leaves: int = 31
+    learning_rate: float = 0.05
+    n_estimators: int = 200
+    min_data_in_leaf: int = 20
+
+
+@dataclass(frozen=True)
+class WalkForwardSingleDateConfig:
+    factor_panel_path: str
+    output_scores_path: str
+    output_metrics_path: str
+    test_month: str
+    as_of_date: str
+    label_column: str = "fwd_return_5"
+    feature_columns: tuple[str, ...] = tuple(DEFAULT_FEATURE_COLUMNS)
+    train_window_months: int = 12
+    num_leaves: int = 31
+    learning_rate: float = 0.05
+    n_estimators: int = 200
+    min_data_in_leaf: int = 20
+
+
 def train_lightgbm_model(config: ModelTrainConfig) -> dict[str, float | int | str]:
     import lightgbm as lgb
 
@@ -143,7 +179,7 @@ def train_lightgbm_model(config: ModelTrainConfig) -> dict[str, float | int | st
     return metrics
 
 
-def train_lightgbm_latest_inference(config: LatestInferenceConfig) -> dict[str, float | int | str]:
+def train_lightgbm_walk_forward_as_of_date(config: WalkForwardAsOfDateConfig) -> dict[str, float | int | str]:
     import lightgbm as lgb
 
     frame = pd.read_parquet(config.factor_panel_path).sort_values(["trade_date", "symbol"]).copy()
@@ -151,19 +187,19 @@ def train_lightgbm_latest_inference(config: LatestInferenceConfig) -> dict[str, 
         raise ValueError("factor panel is empty")
 
     frame["trade_date"] = pd.to_datetime(frame["trade_date"])
-    if config.inference_date is None:
-        inference_date = frame["trade_date"].max()
+    if config.as_of_date is None:
+        as_of_date = frame["trade_date"].max()
     else:
-        inference_date = pd.Timestamp(config.inference_date)
+        as_of_date = pd.Timestamp(config.as_of_date)
 
-    inference_frame = frame.loc[frame["trade_date"] == inference_date].copy()
-    if inference_frame.empty:
-        raise ValueError("inference date produced an empty dataset")
-    inference_frame = inference_frame.dropna(subset=list(config.feature_columns)).copy()
-    if inference_frame.empty:
-        raise ValueError("inference rows have no valid feature values")
+    scoring_frame = frame.loc[frame["trade_date"] == as_of_date].copy()
+    if scoring_frame.empty:
+        raise ValueError("as-of date produced an empty dataset")
+    scoring_frame = scoring_frame.dropna(subset=list(config.feature_columns)).copy()
+    if scoring_frame.empty:
+        raise ValueError("as-of-date rows have no valid feature values")
 
-    train_frame = frame.loc[frame["trade_date"] < inference_date].copy()
+    train_frame = frame.loc[frame["trade_date"] < as_of_date].copy()
     train_frame["month"] = train_frame["trade_date"].dt.to_period("M")
     if config.train_window_months > 0:
         train_months = sorted(train_frame["month"].dropna().unique().tolist())
@@ -183,14 +219,14 @@ def train_lightgbm_latest_inference(config: LatestInferenceConfig) -> dict[str, 
         verbose=-1,
     )
     model.fit(train_frame.loc[:, list(config.feature_columns)], train_frame[config.label_column])
-    predictions = model.predict(inference_frame.loc[:, list(config.feature_columns)])
+    predictions = model.predict(scoring_frame.loc[:, list(config.feature_columns)])
 
-    scored = inference_frame.loc[:, ["trade_date", "symbol"]].copy()
-    if config.label_column in inference_frame.columns:
-        scored["label"] = inference_frame[config.label_column]
+    scored = scoring_frame.loc[:, ["trade_date", "symbol"]].copy()
+    if config.label_column in scoring_frame.columns:
+        scored["label"] = scoring_frame[config.label_column]
     scored["prediction"] = predictions
     scored["train_end_date"] = train_frame["trade_date"].max().date().isoformat()
-    scored["inference_date"] = inference_date.date().isoformat()
+    scored["as_of_date"] = as_of_date.date().isoformat()
 
     scores_path = Path(config.output_scores_path)
     scores_path.parent.mkdir(parents=True, exist_ok=True)
@@ -203,7 +239,7 @@ def train_lightgbm_latest_inference(config: LatestInferenceConfig) -> dict[str, 
         "train_rows": int(len(train_frame)),
         "train_start_date": train_frame["trade_date"].min().date().isoformat(),
         "train_end_date": train_frame["trade_date"].max().date().isoformat(),
-        "inference_date": inference_date.date().isoformat(),
+        "as_of_date": as_of_date.date().isoformat(),
         "scored_rows": int(len(scored)),
         "scored_symbol_count": int(scored["symbol"].nunique()),
     }
@@ -214,11 +250,134 @@ def train_lightgbm_latest_inference(config: LatestInferenceConfig) -> dict[str, 
     return metrics
 
 
+def train_lightgbm_walk_forward_single_date(config: WalkForwardSingleDateConfig) -> dict[str, float | int | str]:
+    import lightgbm as lgb
+
+    LOGGER.info(
+        "single-date score start factor_panel=%s as_of_date=%s test_month=%s output_scores=%s",
+        config.factor_panel_path,
+        config.as_of_date,
+        config.test_month,
+        config.output_scores_path,
+    )
+    frame = pd.read_parquet(config.factor_panel_path).sort_values(["trade_date", "symbol"]).copy()
+    if frame.empty:
+        raise ValueError("factor panel is empty")
+
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+    frame = frame.dropna(subset=["trade_date"]).copy()
+    frame = frame.dropna(subset=list(config.feature_columns)).copy()
+    frame["month"] = frame["trade_date"].dt.to_period("M")
+
+    as_of_date = pd.Timestamp(config.as_of_date)
+    test_month = pd.Period(config.test_month, freq="M")
+    if as_of_date.to_period("M") != test_month:
+        raise ValueError("as_of_date must fall within test_month")
+
+    all_months = sorted(frame["month"].dropna().unique().tolist())
+    if test_month not in all_months:
+        raise ValueError("test_month produced no data in factor panel")
+    month_index = all_months.index(test_month)
+    train_end_index = month_index - 1
+    if train_end_index < 0:
+        raise ValueError("walk-forward single-date training has no prior months to train on")
+    train_start_index = max(0, train_end_index - config.train_window_months + 1)
+    train_months = all_months[train_start_index : train_end_index + 1]
+
+    train_frame = frame.loc[frame["month"].isin(train_months)].copy()
+    train_frame = train_frame.dropna(subset=list(config.feature_columns) + [config.label_column]).copy()
+    scoring_frame = frame.loc[frame["trade_date"] == as_of_date].copy()
+    if train_frame.empty:
+        raise ValueError("walk-forward single-date training set is empty")
+    if scoring_frame.empty:
+        raise ValueError("as-of date produced an empty dataset")
+
+    model = lgb.LGBMRegressor(
+        objective="regression",
+        num_leaves=config.num_leaves,
+        learning_rate=config.learning_rate,
+        n_estimators=config.n_estimators,
+        min_data_in_leaf=config.min_data_in_leaf,
+        random_state=42,
+        verbose=-1,
+    )
+    model.fit(train_frame.loc[:, list(config.feature_columns)], train_frame[config.label_column])
+    predictions = model.predict(scoring_frame.loc[:, list(config.feature_columns)])
+
+    scored = scoring_frame.loc[:, ["trade_date", "symbol"]].copy()
+    if config.label_column in scoring_frame.columns:
+        scored["label"] = scoring_frame[config.label_column]
+    scored["prediction"] = predictions
+    scored["train_end_month"] = str(train_months[-1])
+    scored["test_month"] = str(test_month)
+
+    scores_path = Path(config.output_scores_path)
+    scores_path.parent.mkdir(parents=True, exist_ok=True)
+    scored.to_parquet(scores_path, index=False)
+
+    labeled_eval = scored.dropna(subset=["label"]).copy() if "label" in scored.columns else pd.DataFrame()
+    metrics: dict[str, float | int | str] = {
+        "label_column": config.label_column,
+        "feature_count": int(len(config.feature_columns)),
+        "train_window_months": config.train_window_months,
+        "train_rows": int(len(train_frame)),
+        "train_start_month": str(train_months[0]),
+        "train_end_month": str(train_months[-1]),
+        "test_month": str(test_month),
+        "as_of_date": as_of_date.date().isoformat(),
+        "scored_rows": int(len(scored)),
+        "scored_symbol_count": int(scored["symbol"].nunique()),
+        "eval_rows": int(len(labeled_eval)),
+    }
+    if not labeled_eval.empty:
+        metrics["mae"] = float((labeled_eval["prediction"] - labeled_eval["label"]).abs().mean())
+        metrics["rmse"] = float((((labeled_eval["prediction"] - labeled_eval["label"]) ** 2).mean()) ** 0.5)
+        metrics["spearman_ic"] = float(labeled_eval[["prediction", "label"]].corr(method="spearman").iloc[0, 1])
+    else:
+        metrics["mae"] = "n/a"
+        metrics["rmse"] = "n/a"
+        metrics["spearman_ic"] = "n/a"
+
+    metrics_path = Path(config.output_metrics_path)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
+    LOGGER.info(
+        "single-date score complete as_of_date=%s scored_rows=%s scored_symbols=%s train_rows=%s output_scores=%s",
+        metrics["as_of_date"],
+        metrics["scored_rows"],
+        metrics["scored_symbol_count"],
+        metrics["train_rows"],
+        scores_path.as_posix(),
+    )
+    return metrics
+
+
+def train_lightgbm_latest_inference(config: LatestInferenceConfig) -> dict[str, float | int | str]:
+    metrics = train_lightgbm_walk_forward_as_of_date(
+        WalkForwardAsOfDateConfig(
+            factor_panel_path=config.factor_panel_path,
+            output_scores_path=config.output_scores_path,
+            output_metrics_path=config.output_metrics_path,
+            label_column=config.label_column,
+            as_of_date=config.inference_date,
+            train_window_months=config.train_window_months,
+            feature_columns=config.feature_columns,
+            num_leaves=config.num_leaves,
+            learning_rate=config.learning_rate,
+            n_estimators=config.n_estimators,
+            min_data_in_leaf=config.min_data_in_leaf,
+        )
+    )
+    metrics["inference_date"] = str(metrics["as_of_date"])
+    return metrics
+
+
 def train_lightgbm_walk_forward(config: WalkForwardConfig) -> dict[str, float | int | str]:
     import lightgbm as lgb
 
     frame = pd.read_parquet(config.factor_panel_path).sort_values(["trade_date", "symbol"])
-    frame = frame.dropna(subset=list(config.feature_columns) + [config.label_column]).copy()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+    frame = frame.dropna(subset=list(config.feature_columns)).copy()
     frame["month"] = frame["trade_date"].dt.to_period("M")
 
     all_months = sorted(frame["month"].unique().tolist())
@@ -230,6 +389,7 @@ def train_lightgbm_walk_forward(config: WalkForwardConfig) -> dict[str, float | 
 
     scored_parts: list[pd.DataFrame] = []
     window_metrics: list[dict[str, float | int | str]] = []
+    eval_metrics: list[dict[str, float]] = []
 
     for test_month in test_months:
         month_index = all_months.index(test_month)
@@ -240,6 +400,7 @@ def train_lightgbm_walk_forward(config: WalkForwardConfig) -> dict[str, float | 
         train_months = all_months[train_start_index : train_end_index + 1]
         train_frame = frame.loc[frame["month"].isin(train_months)].copy()
         test_frame = frame.loc[frame["month"] == test_month].copy()
+        train_frame = train_frame.dropna(subset=list(config.feature_columns) + [config.label_column]).copy()
         if train_frame.empty or test_frame.empty:
             continue
 
@@ -255,28 +416,44 @@ def train_lightgbm_walk_forward(config: WalkForwardConfig) -> dict[str, float | 
         model.fit(train_frame.loc[:, list(config.feature_columns)], train_frame[config.label_column])
         predictions = model.predict(test_frame.loc[:, list(config.feature_columns)])
 
-        scored = test_frame.loc[:, ["trade_date", "symbol", config.label_column]].copy()
+        scored = test_frame.loc[:, ["trade_date", "symbol"]].copy()
+        if config.label_column in test_frame.columns:
+            scored["label"] = test_frame[config.label_column]
         scored["prediction"] = predictions
         scored["train_end_month"] = str(train_months[-1])
         scored["test_month"] = str(test_month)
-        scored = scored.rename(columns={config.label_column: "label"})
         scored_parts.append(scored)
 
-        mae = float((scored["prediction"] - scored["label"]).abs().mean())
-        rmse = float((((scored["prediction"] - scored["label"]) ** 2).mean()) ** 0.5)
-        ic = float(scored[["prediction", "label"]].corr(method="spearman").iloc[0, 1])
-        window_metrics.append(
-            {
-                "test_month": str(test_month),
-                "train_start_month": str(train_months[0]),
-                "train_end_month": str(train_months[-1]),
-                "train_rows": int(len(train_frame)),
-                "test_rows": int(len(test_frame)),
-                "mae": mae,
-                "rmse": rmse,
-                "spearman_ic": ic,
-            }
-        )
+        labeled_eval = scored.dropna(subset=["label"]).copy() if "label" in scored.columns else pd.DataFrame()
+        metric_row: dict[str, float | int | str] = {
+            "test_month": str(test_month),
+            "train_start_month": str(train_months[0]),
+            "train_end_month": str(train_months[-1]),
+            "train_rows": int(len(train_frame)),
+            "test_rows": int(len(test_frame)),
+            "eval_rows": int(len(labeled_eval)),
+        }
+        if not labeled_eval.empty:
+            mae = float((labeled_eval["prediction"] - labeled_eval["label"]).abs().mean())
+            rmse = float((((labeled_eval["prediction"] - labeled_eval["label"]) ** 2).mean()) ** 0.5)
+            ic = float(labeled_eval[["prediction", "label"]].corr(method="spearman").iloc[0, 1])
+            metric_row.update(
+                {
+                    "mae": mae,
+                    "rmse": rmse,
+                    "spearman_ic": ic,
+                }
+            )
+            eval_metrics.append({"mae": mae, "rmse": rmse, "spearman_ic": ic})
+        else:
+            metric_row.update(
+                {
+                    "mae": "n/a",
+                    "rmse": "n/a",
+                    "spearman_ic": "n/a",
+                }
+            )
+        window_metrics.append(metric_row)
 
     if not scored_parts:
         raise ValueError("walk-forward training produced no scored windows")
@@ -286,9 +463,9 @@ def train_lightgbm_walk_forward(config: WalkForwardConfig) -> dict[str, float | 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     all_scored.to_parquet(scores_path, index=False)
 
-    mean_mae = float(pd.Series([item["mae"] for item in window_metrics]).mean())
-    mean_rmse = float(pd.Series([item["rmse"] for item in window_metrics]).mean())
-    mean_ic = float(pd.Series([item["spearman_ic"] for item in window_metrics]).mean())
+    mean_mae = float(pd.Series([item["mae"] for item in eval_metrics]).mean()) if eval_metrics else 0.0
+    mean_rmse = float(pd.Series([item["rmse"] for item in eval_metrics]).mean()) if eval_metrics else 0.0
+    mean_ic = float(pd.Series([item["spearman_ic"] for item in eval_metrics]).mean()) if eval_metrics else 0.0
     metrics = {
         "label_column": config.label_column,
         "feature_count": int(len(config.feature_columns)),

@@ -1,11 +1,16 @@
 [storage]
 root = "storage"
 
-[factors]
-output_path = "research/factors/full_factor_panel_industry_v4_v1_1.parquet"
+[factor_spec]
+id = "research_industry_v4_v1_1"
 universe_name = "tradable_core"
 start_date = "2024-01-02"
-end_date = "2026-03-10"
+
+[research_snapshot]
+as_of_date = "2026-03-10"
+
+[factors]
+output_path = "research/factors/research_industry_v4_v1_1/tradable_core/start_2024-01-02/asof_2026-03-10.parquet"
 
 [training]
 label_column = "industry_excess_fwd_return_5"
@@ -30,7 +35,7 @@ keep_buffer = 2
 min_turnover_names = 3
 min_daily_amount = 0
 max_names_per_industry = 2
-initial_cash = 1000000
+initial_cash = 100000
 commission_rate = 0.0003
 stamp_tax_rate = 0.001
 slippage_rate = 0.0005

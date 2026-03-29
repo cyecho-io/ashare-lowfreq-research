@@ -3,8 +3,12 @@ __pycache__/
 .pytest_cache/
 .venv/
 .idea/
+.coverage
+htmlcov/
+*.log
 .DS_Store
 .env
+.env.*
 
 strategies/registry.json
 results/

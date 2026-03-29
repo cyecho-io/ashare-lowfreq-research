@@ -26,6 +26,7 @@ class ScoreStrategyConfig:
     keep_buffer: int = 2
     min_turnover_names: int = 2
     min_daily_amount: float = 0.0
+    max_close_price: float = 0.0
     max_names_per_industry: int = 0
     max_position_weight: float = 0.0
     exit_policy: str = "buffered_rank"
@@ -68,18 +69,27 @@ class ScoreTopKStrategy(BaseStrategy):
                 str(row["symbol"]): float(row["prediction"]) for _, row in day_frame.iterrows()
             }
         instruments_path = Path(config.storage_root) / "parquet" / "instruments" / "ashare_instruments.parquet"
-        instruments = pd.read_parquet(instruments_path, columns=["symbol", "industry_level_1"])
+        instruments = pd.read_parquet(instruments_path)
+        if "is_st" not in instruments.columns:
+            instruments["is_st"] = False
+        else:
+            instruments["is_st"] = instruments["is_st"].fillna(False).astype(bool)
         self._industry_by_symbol = {
             str(row["symbol"]): str(row["industry_level_1"]) if pd.notna(row["industry_level_1"]) else ""
             for _, row in instruments.iterrows()
+        }
+        self._st_symbols = {
+            str(row["symbol"])
+            for _, row in instruments.loc[instruments["is_st"], ["symbol"]].iterrows()
         }
         self._hold_days: dict[str, int] = {}
         self._last_rebalance_date: date | None = None
 
     def rebalance(self, context: StrategyContext) -> RebalanceDecision:
-        if not context.universe:
+        eligible_universe = self._eligible_universe(context)
+        if not eligible_universe:
             return RebalanceDecision(False, "empty_universe")
-        sample_history = context.history(context.universe[0])
+        sample_history = context.history(eligible_universe[0])
         if len(sample_history) < self.metadata.lookback_window:
             return RebalanceDecision(False, "insufficient_history")
         if self._last_rebalance_date is not None:
@@ -96,7 +106,7 @@ class ScoreTopKStrategy(BaseStrategy):
         if score_date is None:
             return []
         ranked = self._scores_by_date.get(score_date.isoformat(), [])
-        allowed = set(context.universe)
+        allowed = set(self._eligible_universe(context))
         rank_map = {symbol: index for index, (_, symbol) in enumerate(ranked) if symbol in allowed}
         liquidity_ok = self._liquidity_ok_symbols(context)
         self._advance_holding_days(context)
@@ -171,6 +181,9 @@ class ScoreTopKStrategy(BaseStrategy):
             return None
         return sample_history[-1].trade_date
 
+    def _eligible_universe(self, context: StrategyContext) -> tuple[str, ...]:
+        return tuple(symbol for symbol in context.universe if symbol not in self._st_symbols)
+
     def _advance_holding_days(self, context: StrategyContext) -> None:
         active_symbols = set(context.positions)
         next_hold_days: dict[str, int] = {}
@@ -186,13 +199,17 @@ class ScoreTopKStrategy(BaseStrategy):
         return history[-1].trade_date == score_date
 
     def _liquidity_ok_symbols(self, context: StrategyContext) -> set[str]:
-        if self.config.min_daily_amount <= 0:
-            return set(context.universe)
         passed: set[str] = set()
         for symbol in context.universe:
             history = context.history(symbol)
-            if history and history[-1].amount >= self.config.min_daily_amount:
-                passed.add(symbol)
+            if not history:
+                continue
+            latest_bar = history[-1]
+            if self.config.min_daily_amount > 0 and latest_bar.amount < self.config.min_daily_amount:
+                continue
+            if self.config.max_close_price > 0 and latest_bar.close > self.config.max_close_price:
+                continue
+            passed.add(symbol)
         return passed
 
     def _industry_counts(self, symbols: list[str]) -> dict[str, int]:

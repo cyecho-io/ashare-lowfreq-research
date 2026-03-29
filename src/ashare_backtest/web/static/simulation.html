@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Simulated Trading Console</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <nav class="topnav" aria-label="Global">
+        <a class="topnav-link" href="/">数据看板</a>
+        <a class="topnav-link" href="/backtest">回测控制台</a>
+        <a class="topnav-link active" href="/simulation">模拟成交台</a>
+      </nav>
+
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Simulated Trading Console</p>
+          <h1>模拟成交台</h1>
+          <p class="subcopy">顶部用于创建新模拟账户；进入账户详情后，再按账户历史顺序滚动生成后续盘前计划和模拟下单。</p>
+        </div>
+        <div class="hero-meta">
+          <a class="pill link-pill" href="/backtest">回测控制台</a>
+          <span class="pill">模拟账户</span>
+        </div>
+      </header>
+
+      <main class="grid paper-grid">
+        <section class="panel control-panel">
+          <div class="panel-head">
+            <h2>创建模拟账户</h2>
+            <p>只用于初始化新模拟账户。账户创建后，初始资金和历史状态不再允许通过顶部表单改动。</p>
+          </div>
+          <div class="paper-latest-meta" id="simulation-latest-meta"></div>
+          <form id="simulation-form" class="form-stack paper-form">
+            <label>
+              <span>策略配置</span>
+              <select id="simulation-strategy-select" name="config_path" required></select>
+            </label>
+            <label>
+              <span>信号截止日期</span>
+              <input id="simulation-trade-date" name="signal_date" type="date" required />
+            </label>
+            <label>
+              <span>模拟初始资金</span>
+              <input id="simulation-initial-cash" name="initial_cash" type="number" min="1000" step="1000" required />
+            </label>
+            <label>
+              <span>计划标签</span>
+              <input id="simulation-label" name="label" type="text" placeholder="可选，默认按策略名生成计划" />
+            </label>
+            <div class="preset-meta" id="simulation-preset-meta"></div>
+            <div class="paper-action-row">
+              <button id="simulation-run-button" class="primary-button" type="submit">创建模拟账户</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel runs-panel">
+          <div class="panel-head">
+            <h2>账户计划流</h2>
+            <p>这里展示各模拟账户当前最新状态节点，可随时切回查看账户推进状态。</p>
+          </div>
+          <div id="simulation-runs-list" class="run-list"></div>
+        </section>
+
+        <section class="panel summary-panel">
+          <div class="panel-head">
+            <h2>账户详情</h2>
+            <p id="simulation-result-title">正在读取当前策略的 latest 账户状态。</p>
+          </div>
+          <div class="tab-toolbar">
+            <div class="tab-strip" role="tablist" aria-label="Simulation detail tabs">
+              <button id="simulation-tab-account" class="tab-button active" type="button" role="tab" aria-selected="true">账户状态</button>
+              <button id="simulation-tab-history" class="tab-button" type="button" role="tab" aria-selected="false">执行历史</button>
+              <button id="simulation-tab-lineage" class="tab-button" type="button" role="tab" aria-selected="false">状态演化</button>
+            </div>
+            <div class="paper-action-row simulation-toolbar-row">
+              <button id="simulation-primary-action-button" class="primary-button" type="button">生成盘前计划</button>
+            </div>
+          </div>
+          <div id="simulation-job-status" class="job-status simulation-job-status muted">先选择策略、首个信号截止日期和初始资金，再创建模拟账户。</div>
+          <div id="simulation-panel-account" class="tab-panel active" role="tabpanel">
+            <div id="simulation-summary-cards" class="summary-cards paper-summary-cards"></div>
+            <div class="state-grid paper-state-grid">
+              <div class="state-panel">
+                <div class="state-head">
+                  <h3>当前持仓</h3>
+                  <span id="simulation-preopen-count" class="muted"></span>
+                </div>
+                <div id="simulation-preopen-list" class="holding-list"></div>
+              </div>
+            </div>
+            <div class="state-panel action-panel">
+              <div class="state-head">
+                <h3>本次计划订单建议</h3>
+                <span id="simulation-action-count" class="muted"></span>
+              </div>
+              <div id="simulation-action-list" class="action-list"></div>
+            </div>
+          </div>
+          <div id="simulation-panel-history" class="tab-panel" role="tabpanel" hidden>
+            <div id="simulation-history-summary" class="summary-cards paper-summary-cards"></div>
+            <div class="trade-toolbar">
+              <input id="simulation-history-filter" type="search" placeholder="按股票代码或 reason 过滤执行成交" />
+              <span id="simulation-history-count" class="muted"></span>
+            </div>
+            <div class="table-shell">
+              <table>
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>代码</th>
+                    <th>方向</th>
+                    <th>数量</th>
+                    <th>价格</th>
+                    <th>金额</th>
+                    <th>状态</th>
+                    <th>原因</th>
+                  </tr>
+                </thead>
+                <tbody id="simulation-history-body"></tbody>
+              </table>
+            </div>
+          </div>
+          <div id="simulation-panel-lineage" class="tab-panel" role="tabpanel" hidden>
+            <div class="trade-toolbar">
+              <input id="simulation-lineage-filter" type="search" placeholder="按日期、决策原因或股票代码过滤状态演化" />
+              <span id="simulation-lineage-count" class="muted"></span>
+            </div>
+            <div class="table-shell">
+              <table>
+                <thead>
+                  <tr>
+                    <th>交易日</th>
+                    <th>信号日</th>
+                    <th>原因</th>
+                    <th>调仓</th>
+                    <th>当前持仓</th>
+                    <th>目标持仓</th>
+                    <th>选股</th>
+                    <th>决策前现金</th>
+                  </tr>
+                </thead>
+                <tbody id="simulation-lineage-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel trades-panel">
+          <div class="panel-head">
+            <h2>风险与账户快照</h2>
+            <p>展示本次计划风险提示，以及当前账户最新状态摘要。</p>
+          </div>
+          <div class="paper-detail-grid">
+            <div class="detail-card">
+              <div class="state-head">
+                <h3>风险提示</h3>
+                <span id="simulation-risk-count" class="muted"></span>
+              </div>
+              <div id="simulation-risk-list" class="detail-list"></div>
+            </div>
+            <div class="detail-card">
+              <div class="state-head">
+                <h3>当前账户快照</h3>
+              </div>
+              <div id="simulation-next-state" class="detail-list"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/simulation.js"></script>
+  </body>
+</html>
