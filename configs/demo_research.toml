@@ -4,19 +4,19 @@ root = "storage/demo"
 [factor_spec]
 id = "demo_strategy"
 universe_name = "tradable_core"
-start_date = "2025-12-01"
+start_date = "2024-01-02"
 
 [research_snapshot]
-as_of_date = "2026-03-20"
+as_of_date = "2026-03-10"
 
 [factors]
 output_path = "research/demo/factors/demo_strategy.parquet"
 
 [training]
-label_column = "fwd_return_5"
-train_window_months = 2
-test_start_month = "2026-02"
-test_end_month = "2026-03"
+label_column = "industry_excess_fwd_return_5"
+train_window_months = 12
+test_start_month = "2025-01"
+test_end_month = "2026-02"
 score_output_path = "research/demo/models/demo_scores.parquet"
 metric_output_path = "research/demo/models/demo_metrics.json"
 
@@ -25,14 +25,14 @@ layer_output_path = "research/demo/models/demo_layer.json"
 
 [model_backtest]
 output_dir = "results/demo_backtest"
-start_date = "2026-02-02"
-end_date = "2026-03-20"
-top_k = 5
+start_date = "2025-01-02"
+end_date = "2026-02-27"
+top_k = 6
 rebalance_every = 5
 lookback_window = 20
-min_hold_bars = 5
-keep_buffer = 1
-min_turnover_names = 1
+min_hold_bars = 8
+keep_buffer = 2
+min_turnover_names = 3
 min_daily_amount = 0
 max_names_per_industry = 2
 initial_cash = 100000
