@@ -1,0 +1,43 @@
+{
+  "schema_version": "v1",
+  "source_type": "demo_sample",
+  "source_path": "storage/demo",
+  "imported_at": "2026-03-30T14:31:07",
+  "datasets": [
+    {
+      "name": "bars.daily",
+      "path": "parquet/bars/daily.parquet",
+      "rows": 634,
+      "min_date": "2025-12-01",
+      "max_date": "2026-03-27"
+    },
+    {
+      "name": "instruments.ashare",
+      "path": "parquet/instruments/ashare_instruments.parquet",
+      "rows": 8,
+      "min_date": "1990-12-01",
+      "max_date": "2026-03-27"
+    },
+    {
+      "name": "calendar.ashare",
+      "path": "parquet/calendar/ashare_trading_calendar.parquet",
+      "rows": 117,
+      "min_date": "2025-12-01",
+      "max_date": "2026-03-27"
+    },
+    {
+      "name": "universe.memberships",
+      "path": "parquet/universe/memberships.parquet",
+      "rows": 16,
+      "min_date": "2026-03-27",
+      "max_date": "2026-03-27"
+    },
+    {
+      "name": "benchmarks.000300",
+      "path": "parquet/benchmarks/000300.SH.parquet",
+      "rows": 77,
+      "min_date": "2025-12-01",
+      "max_date": "2026-03-27"
+    }
+  ]
+}

@@ -46,13 +46,73 @@ Generated outputs under `results/`, `research/factors/`, and `research/models/` 
 Requires Python 3.11+.
 
 ```bash
-python -m pip install -e .
+python -m pip install -e ".[dev]"
 ```
 
 This exposes:
 
 - `ashare-backtest`
 - `ashare-backtest-web`
+
+Copy the environment template before using Tushare-backed commands:
+
+```bash
+cp .env.example .env
+```
+
+Then fill in `TUSHARE_TOKEN` when you want to sync real market data.
+
+## Quick Demo
+
+If you want to evaluate the repository after clone without preparing your own market data, use the bundled tiny dataset under `storage/demo/`.
+
+Set up the environment:
+
+```bash
+bash scripts/bootstrap_demo.sh
+source .venv/bin/activate
+```
+
+Run the demo research preset:
+
+```bash
+ashare-backtest run-research-config configs/demo_research.toml
+```
+
+Start the local web console:
+
+```bash
+ashare-backtest-web
+```
+
+Then open `http://127.0.0.1:8765`.
+
+What this demo gives you:
+
+- a tracked tiny A-share sample dataset
+- one runnable research preset
+- generated backtest outputs under `results/demo_backtest`
+- a local web UI for dashboard, backtest artifacts, and simulation views
+
+If you want to switch from demo data to your own local dataset later, update the storage root in your config and use the full workflow below.
+
+## Open Source Readiness
+
+To make this repository easy to evaluate after clone, treat these as the minimum operator path:
+
+- install with `python -m pip install -e ".[dev]"`
+- copy `.env.example` and fill `TUSHARE_TOKEN` only when using Tushare sync
+- start from [`examples/demo_research_config.toml`](/Users/yongqiuwu/works/github/Trade/examples/demo_research_config.toml) when creating a new research preset
+- use [`configs/demo_research.toml`](/Users/yongqiuwu/works/github/Trade/configs/demo_research.toml) for the tracked tiny sample dataset under `storage/demo/`
+- use local demo or prebuilt data artifacts if you want to showcase the web console without requiring a Tushare account
+
+The repository still assumes local data exists under `storage/` for most backtest and web-console flows. A tracked tiny sample dataset now lives under `storage/demo/` for public evaluation.
+
+You can also use the bootstrap helper to set up a local virtual environment and install dependencies:
+
+```bash
+bash scripts/bootstrap_demo.sh
+```
 
 ## Quick Start
 
@@ -82,6 +142,18 @@ Run a configured research pipeline:
 
 ```bash
 ashare-backtest run-research-config configs/research_industry_v4_v1_1.toml
+```
+
+Use the template config as a starting point for public examples or small reproducible runs:
+
+```bash
+cp examples/demo_research_config.toml configs/demo_research.toml
+```
+
+Run the tracked demo preset against the bundled tiny dataset:
+
+```bash
+ashare-backtest run-research-config configs/demo_research.toml
 ```
 
 Run a backtest from exported model scores:
@@ -152,11 +224,20 @@ The default tradable universe workflow gates stocks at the `universe` layer befo
 - [`docs/strategy-v1-1-latest-active-data-source.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v1-1-latest-active-data-source.md)
 - [`docs/strategy-v2-live-readiness-checklist.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-live-readiness-checklist.md)
 - [`docs/strategy-v2-roadmap.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-roadmap.md)
+- [`CONTRIBUTING.md`](/Users/yongqiuwu/works/github/Trade/CONTRIBUTING.md)
+- [`storage/demo/README.md`](/Users/yongqiuwu/works/github/Trade/storage/demo/README.md)
 
 ## Testing
 
 Run the test suite with:
 
 ```bash
+python3 -m pytest
+```
+
+Install the package first so `ashare_backtest` is importable:
+
+```bash
+python -m pip install -e ".[dev]"
 python3 -m pytest
 ```

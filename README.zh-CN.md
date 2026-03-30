@@ -48,13 +48,73 @@
 需要 Python 3.11+。
 
 ```bash
-python -m pip install -e .
+python -m pip install -e ".[dev]"
 ```
 
 安装后会暴露两个命令：
 
 - `ashare-backtest`
 - `ashare-backtest-web`
+
+建议先复制环境变量模板：
+
+```bash
+cp .env.example .env
+```
+
+只有在使用 Tushare 同步真实数据时，才需要填写 `TUSHARE_TOKEN`。
+
+## 快速体验
+
+如果你只是想在 clone 之后先体验一遍功能，而不想先准备自己的行情数据，可以直接使用仓库里内置的 `storage/demo/` 极小样例数据。
+
+先初始化环境：
+
+```bash
+bash scripts/bootstrap_demo.sh
+source .venv/bin/activate
+```
+
+运行内置 demo 研究配置：
+
+```bash
+ashare-backtest run-research-config configs/demo_research.toml
+```
+
+启动本地 Web 控制台：
+
+```bash
+ashare-backtest-web
+```
+
+然后打开 `http://127.0.0.1:8765`。
+
+这个 demo 路径会给你：
+
+- 一套已跟踪的极小 A 股样例数据
+- 一个可直接运行的研究配置
+- 一份输出到 `results/demo_backtest` 的回测结果
+- 一个可查看数据状态、回测工件和模拟视图的本地 Web 界面
+
+如果后面要切到你自己的本地数据，只需要把配置里的 `storage root` 换掉，再走下面的完整工作流即可。
+
+## 开源发布前建议
+
+如果目标是让别人 clone 后尽快体验，建议至少保证这条最短路径可用：
+
+- 用 `python -m pip install -e ".[dev]"` 完成安装
+- 从 `.env.example` 复制出本地 `.env`
+- 从 [`examples/demo_research_config.toml`](/Users/yongqiuwu/works/github/Trade/examples/demo_research_config.toml) 开始改自己的研究配置
+- 用 [`configs/demo_research.toml`](/Users/yongqiuwu/works/github/Trade/configs/demo_research.toml) 直接跑仓库里跟踪的 `storage/demo/` 极小样例数据
+- 如果希望无需 Tushare 账号就能体验 Web 控制台，额外提供一份可追踪的小型 demo 数据
+
+当前仓库的大部分 CLI / Web 流程仍默认依赖 `storage/` 下已有本地数据。现在仓库已经提供了一个可提交的 `storage/demo/` 最小样例数据集，方便对外演示。
+
+也可以先用这个初始化脚本快速搭本地环境：
+
+```bash
+bash scripts/bootstrap_demo.sh
+```
 
 ## 快速开始
 
@@ -78,6 +138,18 @@ ashare-backtest build-factors \
 
 ```bash
 ashare-backtest run-research-config configs/research_industry_v4_v1_1.toml
+```
+
+如果只是做模板复制或对外示例，可以先从这个示例配置开始：
+
+```bash
+cp examples/demo_research_config.toml configs/demo_research.toml
+```
+
+如果只是验证公开仓库是否能跑通，可以直接运行内置 demo 配置：
+
+```bash
+ashare-backtest run-research-config configs/demo_research.toml
 ```
 
 基于模型分数执行回测：
@@ -156,9 +228,18 @@ ashare-backtest-web
 - [`docs/strategy-v1-1-latest-active-data-source.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v1-1-latest-active-data-source.md)
 - [`docs/strategy-v2-live-readiness-checklist.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-live-readiness-checklist.md)
 - [`docs/strategy-v2-roadmap.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-roadmap.md)
+- [`CONTRIBUTING.md`](/Users/yongqiuwu/works/github/Trade/CONTRIBUTING.md)
+- [`storage/demo/README.md`](/Users/yongqiuwu/works/github/Trade/storage/demo/README.md)
 
 ## 测试
 
 ```bash
+python3 -m pytest
+```
+
+首次运行前建议先安装本包，否则测试阶段无法导入 `ashare_backtest`：
+
+```bash
+python -m pip install -e ".[dev]"
 python3 -m pytest
 ```

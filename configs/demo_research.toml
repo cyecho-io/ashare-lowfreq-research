@@ -1,0 +1,41 @@
+[storage]
+root = "storage/demo"
+
+[factor_spec]
+id = "demo_strategy"
+universe_name = "tradable_core"
+start_date = "2025-12-01"
+
+[research_snapshot]
+as_of_date = "2026-03-20"
+
+[factors]
+output_path = "research/demo/factors/demo_strategy.parquet"
+
+[training]
+label_column = "fwd_return_5"
+train_window_months = 2
+test_start_month = "2026-02"
+test_end_month = "2026-03"
+score_output_path = "research/demo/models/demo_scores.parquet"
+metric_output_path = "research/demo/models/demo_metrics.json"
+
+[analysis]
+layer_output_path = "research/demo/models/demo_layer.json"
+
+[model_backtest]
+output_dir = "results/demo_backtest"
+start_date = "2026-02-02"
+end_date = "2026-03-20"
+top_k = 5
+rebalance_every = 5
+lookback_window = 20
+min_hold_bars = 5
+keep_buffer = 1
+min_turnover_names = 1
+min_daily_amount = 0
+max_names_per_industry = 2
+initial_cash = 100000
+commission_rate = 0.0003
+stamp_tax_rate = 0.001
+slippage_rate = 0.0005
