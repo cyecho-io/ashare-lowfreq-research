@@ -81,8 +81,6 @@ source .venv/bin/activate
 ashare-backtest run-research-config configs/demo_research.toml
 ```
 
-仓库里也直接带了一份预生成的 demo 分数文件 [`research/demo/models/demo_scores.parquet`](/Users/yongqiuwu/works/github/Trade/research/demo/models/demo_scores.parquet)，所以 clone 后回测页可以直接使用。只有在你想本地重跑完整研究流程时，才需要再执行上面的 demo research 命令。
-
 启动本地 Web 控制台：
 
 ```bash
@@ -95,9 +93,11 @@ ashare-backtest-web
 
 - 一套已跟踪的极小 A 股样例数据
 - 一个可直接运行的研究配置
-- 一份可直接用于回测页的 demo 分数 parquet
+- 一条会在本地生成因子、分数和回测结果的完整示例链路
 - 一份输出到 `results/demo_backtest` 的回测结果
 - 一个可查看数据状态、回测工件和模拟视图的本地 Web 界面
+
+在打开 `/backtest` 页面之前，请先执行一次 `ashare-backtest run-research-config configs/demo_research.toml`，让 demo 分数文件先在本地生成出来。
 
 如果后面要切到你自己的本地数据，只需要把配置里的 `storage root` 换掉，再走下面的完整工作流即可。
 
