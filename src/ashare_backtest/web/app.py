@@ -21,16 +21,22 @@ import pandas as pd
 
 from ashare_backtest.data import ParquetDataProvider
 from ashare_backtest.data import DEFAULT_SQLITE_SOURCE
-from ashare_backtest.cli.main import (
-    generate_strategy_state_from_config,
-    run_model_backtest,
-    train_walk_forward_single_date_from_config,
+from ashare_backtest.research.services import (
+    ModelBacktestServiceConfig,
+    generate_strategy_state_from_config_service,
+    run_model_backtest_service,
+    train_walk_forward_single_date_from_config_service,
 )
 from ashare_backtest.cli.research_config import ResearchRunConfig, load_research_config, resolve_dated_output_path
 from ashare_backtest.factors import FactorBuildConfig, FactorBuilder, resolve_factor_snapshot_path
 from ashare_backtest.logging_utils import configure_file_logging, get_logger
 from ashare_backtest.research import StrategyStateConfig, generate_strategy_state
 from ashare_backtest.research.trainer import WalkForwardAsOfDateConfig, train_lightgbm_walk_forward_as_of_date
+
+# Backward-compatible aliases kept for local tests and patch points.
+generate_strategy_state_from_config = generate_strategy_state_from_config_service
+run_model_backtest = run_model_backtest_service
+train_walk_forward_single_date_from_config = train_walk_forward_single_date_from_config_service
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
@@ -2457,7 +2463,48 @@ class BacktestWebApp:
             cwd = Path.cwd()
             os.chdir(self.repo_root)
             try:
-                run_model_backtest(**args)
+                run_model_backtest(
+                    config=ModelBacktestServiceConfig(
+                        scores_path=args["scores_path"],
+                        storage_root=args["storage_root"],
+                        top_k=args["top_k"],
+                        rebalance_every=args["rebalance_every"],
+                        lookback_window=args["lookback_window"],
+                        min_hold_bars=args["min_hold_bars"],
+                        keep_buffer=args["keep_buffer"],
+                        min_turnover_names=args["min_turnover_names"],
+                        min_daily_amount=args["min_daily_amount"],
+                        max_close_price=args["max_close_price"],
+                        max_names_per_industry=args["max_names_per_industry"],
+                        max_position_weight=args["max_position_weight"],
+                        exit_policy=args["exit_policy"],
+                        grace_rank_buffer=args["grace_rank_buffer"],
+                        grace_momentum_window=args["grace_momentum_window"],
+                        grace_min_return=args["grace_min_return"],
+                        trailing_stop_window=args["trailing_stop_window"],
+                        trailing_stop_drawdown=args["trailing_stop_drawdown"],
+                        trailing_stop_min_gain=args["trailing_stop_min_gain"],
+                        score_reversal_confirm_days=args["score_reversal_confirm_days"],
+                        score_reversal_threshold=args["score_reversal_threshold"],
+                        hybrid_price_window=args["hybrid_price_window"],
+                        hybrid_price_threshold=args["hybrid_price_threshold"],
+                        strong_keep_extra_buffer=args["strong_keep_extra_buffer"],
+                        strong_keep_momentum_window=args["strong_keep_momentum_window"],
+                        strong_keep_min_return=args["strong_keep_min_return"],
+                        strong_trim_slowdown=args["strong_trim_slowdown"],
+                        strong_trim_momentum_window=args["strong_trim_momentum_window"],
+                        strong_trim_min_return=args["strong_trim_min_return"],
+                        initial_cash=args["initial_cash"],
+                        commission_rate=args["commission_rate"],
+                        stamp_tax_rate=args["stamp_tax_rate"],
+                        slippage_rate=args["slippage_rate"],
+                        max_trade_participation_rate=args["max_trade_participation_rate"],
+                        max_pending_days=args["max_pending_days"],
+                    ),
+                    start_date=args["start_date"],
+                    end_date=args["end_date"],
+                    output_dir=args["output_dir"],
+                )
                 _build_strategy_state_snapshot(config, initial_cash, output_dir, scores_path=scores_path)
             finally:
                 os.chdir(cwd)

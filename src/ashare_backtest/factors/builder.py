@@ -33,6 +33,9 @@ class FactorBuildConfig:
 
 
 class FactorBuilder:
+    BARS_COLUMNS = ["symbol", "trade_date", "high", "low", "close", "volume", "amount"]
+    INSTRUMENT_COLUMNS = ["symbol", "industry_level_1"]
+
     def __init__(self, config: FactorBuildConfig) -> None:
         self.config = config
         self.storage_root = Path(config.storage_root)
@@ -48,11 +51,6 @@ class FactorBuilder:
             self.config.as_of_date or "-",
             self.config.start_date or "-",
         )
-        frame = pd.read_parquet(self.bars_path)
-        frame = frame.sort_values(["symbol", "trade_date"]).copy()
-        instruments = pd.read_parquet(self.instruments_path, columns=["symbol", "industry_level_1"])
-        frame = frame.merge(instruments, on="symbol", how="left")
-
         symbols = self.config.symbols
         as_of_date = self.config.as_of_date
         if self.config.universe_name:
@@ -61,12 +59,17 @@ class FactorBuilder:
                 universe_name=self.config.universe_name,
                 as_of_date=as_of_date,
             )
+        frame = pd.read_parquet(self.bars_path, columns=self.BARS_COLUMNS)
         if symbols:
             frame = frame.loc[frame["symbol"].isin(symbols)]
         if self.config.start_date:
             frame = frame.loc[frame["trade_date"] >= pd.Timestamp(self.config.start_date)]
         if as_of_date:
             frame = frame.loc[frame["trade_date"] <= pd.Timestamp(as_of_date)]
+        frame = frame.sort_values(["symbol", "trade_date"]).copy()
+
+        instruments = pd.read_parquet(self.instruments_path, columns=self.INSTRUMENT_COLUMNS)
+        frame = frame.merge(instruments, on="symbol", how="left")
 
         panel = self._build_factor_panel(frame)
         output_path = Path(self.config.output_path)

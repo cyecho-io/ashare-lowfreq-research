@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from ashare_backtest.data import ParquetDataProvider
 from ashare_backtest.engine import BacktestEngine
-from ashare_backtest.protocol import BacktestConfig
-from ashare_backtest.research.score_strategy import ScoreStrategyConfig, ScoreTopKStrategy
+from ashare_backtest.research.score_workflow import (
+    build_preloaded_score_provider,
+    build_score_backtest_config,
+    build_score_strategy,
+)
 
 
 @dataclass(frozen=True)
@@ -34,12 +36,30 @@ class SweepConfig:
     slippage_rate: float = 0.0005
 
 
+@dataclass(frozen=True)
+class _SweepRunConfig:
+    scores_path: str
+    storage_root: str
+    top_k: int
+    rebalance_every: int
+    lookback_window: int
+    min_hold_bars: int
+    keep_buffer: int
+    min_turnover_names: int
+    min_daily_amount: float
+    max_names_per_industry: int
+    initial_cash: float
+    commission_rate: float
+    stamp_tax_rate: float
+    slippage_rate: float
+
+
 def run_model_sweep(config: SweepConfig) -> list[dict[str, float | int]]:
     scores = pd.read_parquet(config.scores_path)
     universe = tuple(sorted(scores["symbol"].astype(str).unique().tolist()))
-    provider = ParquetDataProvider(config.storage_root)
-    provider.preload(
-        symbols=universe,
+    provider = build_preloaded_score_provider(
+        storage_root=config.storage_root,
+        universe=universe,
         start_date=date.fromisoformat(config.start_date),
         end_date=date.fromisoformat(config.end_date),
         lookback=config.lookback_window,
@@ -50,29 +70,29 @@ def run_model_sweep(config: SweepConfig) -> list[dict[str, float | int]]:
     for top_k in config.top_k_values:
         for rebalance_every in config.rebalance_every_values:
             for min_hold_bars in config.min_hold_bars_values:
-                strategy = ScoreTopKStrategy(
-                    ScoreStrategyConfig(
-                        scores_path=config.scores_path,
-                        storage_root=config.storage_root,
-                        top_k=top_k,
-                        rebalance_every=rebalance_every,
-                        lookback_window=config.lookback_window,
-                        min_hold_bars=min_hold_bars,
-                        keep_buffer=config.keep_buffer,
-                        min_turnover_names=config.min_turnover_names,
-                        min_daily_amount=config.min_daily_amount,
-                        max_names_per_industry=config.max_names_per_industry,
-                    )
-                )
-                backtest = BacktestConfig(
-                    strategy_path="__model_score_sweep__",
-                    start_date=date.fromisoformat(config.start_date),
-                    end_date=date.fromisoformat(config.end_date),
-                    universe=universe,
+                run_config = _SweepRunConfig(
+                    scores_path=config.scores_path,
+                    storage_root=config.storage_root,
+                    top_k=top_k,
+                    rebalance_every=rebalance_every,
+                    lookback_window=config.lookback_window,
+                    min_hold_bars=min_hold_bars,
+                    keep_buffer=config.keep_buffer,
+                    min_turnover_names=config.min_turnover_names,
+                    min_daily_amount=config.min_daily_amount,
+                    max_names_per_industry=config.max_names_per_industry,
                     initial_cash=config.initial_cash,
                     commission_rate=config.commission_rate,
                     stamp_tax_rate=config.stamp_tax_rate,
                     slippage_rate=config.slippage_rate,
+                )
+                strategy = build_score_strategy(run_config)
+                backtest = build_score_backtest_config(
+                    run_config,
+                    universe=universe,
+                    start_date=date.fromisoformat(config.start_date),
+                    end_date=date.fromisoformat(config.end_date),
+                    strategy_path="__model_score_sweep__",
                 )
                 result = engine.run_with_strategy(backtest, strategy)
                 rows.append(

@@ -8,11 +8,16 @@ from pathlib import Path
 
 import pandas as pd
 
-from ashare_backtest.data import DataProvider, ParquetDataProvider, load_universe_symbols
+from ashare_backtest.data import DataProvider, ParquetDataProvider
 from ashare_backtest.engine import BacktestEngine
 from ashare_backtest.logging_utils import get_logger
-from ashare_backtest.protocol import AllocationDecision, BacktestConfig, Position, StrategyContext, Trade
-from ashare_backtest.research.score_strategy import ScoreStrategyConfig, ScoreTopKStrategy
+from ashare_backtest.protocol import AllocationDecision, Position, StrategyContext, Trade
+from ashare_backtest.research.score_workflow import (
+    build_preloaded_score_provider,
+    build_score_backtest_config,
+    build_score_strategy,
+    resolve_score_universe,
+)
 
 LOGGER = get_logger("research.analysis")
 
@@ -143,87 +148,6 @@ class StrategyStateConfig(PremarketReferenceConfig):
     mode: str = "continue"
     previous_state_path: str = ""
     simulate_trade_execution: bool = True
-
-
-def _build_score_strategy(config: PremarketReferenceConfig) -> ScoreTopKStrategy:
-    return ScoreTopKStrategy(
-        ScoreStrategyConfig(
-            scores_path=config.scores_path,
-            storage_root=config.storage_root,
-            top_k=config.top_k,
-            rebalance_every=config.rebalance_every,
-            lookback_window=config.lookback_window,
-            min_hold_bars=config.min_hold_bars,
-            keep_buffer=config.keep_buffer,
-            min_turnover_names=config.min_turnover_names,
-            min_daily_amount=config.min_daily_amount,
-            max_close_price=config.max_close_price,
-            max_names_per_industry=config.max_names_per_industry,
-            max_position_weight=config.max_position_weight,
-            exit_policy=config.exit_policy,
-            grace_rank_buffer=config.grace_rank_buffer,
-            grace_momentum_window=config.grace_momentum_window,
-            grace_min_return=config.grace_min_return,
-            trailing_stop_window=config.trailing_stop_window,
-            trailing_stop_drawdown=config.trailing_stop_drawdown,
-            trailing_stop_min_gain=config.trailing_stop_min_gain,
-            score_reversal_confirm_days=config.score_reversal_confirm_days,
-            score_reversal_threshold=config.score_reversal_threshold,
-            hybrid_price_window=config.hybrid_price_window,
-            hybrid_price_threshold=config.hybrid_price_threshold,
-            strong_keep_extra_buffer=config.strong_keep_extra_buffer,
-            strong_keep_momentum_window=config.strong_keep_momentum_window,
-            strong_keep_min_return=config.strong_keep_min_return,
-            strong_trim_slowdown=config.strong_trim_slowdown,
-            strong_trim_momentum_window=config.strong_trim_momentum_window,
-            strong_trim_min_return=config.strong_trim_min_return,
-        )
-    )
-
-
-def _build_backtest_config(config: PremarketReferenceConfig, universe: tuple[str, ...], end_date: date) -> BacktestConfig:
-    return BacktestConfig(
-        strategy_path="__model_score__",
-        start_date=end_date,
-        end_date=end_date,
-        universe=universe,
-        initial_cash=config.initial_cash,
-        commission_rate=config.commission_rate,
-        stamp_tax_rate=config.stamp_tax_rate,
-        slippage_rate=config.slippage_rate,
-        max_trade_participation_rate=config.max_trade_participation_rate,
-        max_pending_days=config.max_pending_days,
-    )
-
-
-def _resolve_score_universe(
-    config: PremarketReferenceConfig,
-    scores: pd.DataFrame,
-    *,
-    as_of_date: date,
-) -> tuple[str, ...]:
-    score_symbols = tuple(sorted(scores["symbol"].astype(str).unique().tolist()))
-    if not config.universe_name:
-        return score_symbols
-
-    allowed_symbols = set(
-        load_universe_symbols(
-            config.storage_root,
-            config.universe_name,
-            as_of_date=as_of_date.isoformat(),
-        )
-    )
-    if not allowed_symbols:
-        raise ValueError(
-            f"universe {config.universe_name} has no members on {as_of_date.isoformat()}"
-        )
-
-    filtered = tuple(symbol for symbol in score_symbols if symbol in allowed_symbols)
-    if not filtered:
-        raise ValueError(
-            f"scores parquet has no symbols in universe {config.universe_name} on {as_of_date.isoformat()}"
-        )
-    return filtered
 
 
 def _serialize_positions(positions: dict[str, Position], portfolio_value: float) -> list[dict[str, object]]:
@@ -467,7 +391,7 @@ def generate_premarket_reference(
 
     scores["trade_date"] = pd.to_datetime(scores["trade_date"])
     provider = provider or ParquetDataProvider(config.storage_root)
-    strategy = _build_score_strategy(config)
+    strategy = build_score_strategy(config)
 
     earliest_score_date = scores["trade_date"].min().date()
     trade_dates = provider.get_trade_dates(earliest_score_date, target_trade_date)
@@ -477,12 +401,14 @@ def generate_premarket_reference(
     if target_index == 0:
         raise ValueError("cannot build premarket reference for the first available trade date")
     signal_date = trade_dates[target_index - 1]
-    universe = _resolve_score_universe(config, scores, as_of_date=signal_date)
-    provider.preload(
-        symbols=universe,
+    universe = resolve_score_universe(config, scores, as_of_date=signal_date)
+    provider = build_preloaded_score_provider(
+        storage_root=config.storage_root,
+        universe=universe,
         start_date=earliest_score_date,
         end_date=target_trade_date,
         lookback=strategy.metadata.lookback_window,
+        provider=provider,
     )
 
     engine = BacktestEngine(provider)
@@ -512,7 +438,7 @@ def generate_premarket_reference(
             cash=cash,
             positions=positions,
             pending_orders=pending_orders,
-            config=_build_backtest_config(config, universe, trade_date_item),
+            config=build_score_backtest_config(config, universe, trade_date_item, trade_date_item),
         )
         context = StrategyContext(
             trade_date=trade_date_item,
@@ -544,7 +470,7 @@ def generate_premarket_reference(
                 cash=cash,
                 positions=positions,
                 allocation=allocation,
-                config=_build_backtest_config(config, universe, trade_date_item),
+                config=build_score_backtest_config(config, universe, trade_date_item, trade_date_item),
             )
             pending_orders = engine._build_pending_orders(
                 cash=cash,
@@ -690,7 +616,7 @@ def generate_strategy_state(
 
     scores["trade_date"] = pd.to_datetime(scores["trade_date"])
     provider = provider or ParquetDataProvider(config.storage_root)
-    strategy = _build_score_strategy(config)
+    strategy = build_score_strategy(config)
 
     earliest_score_date = scores["trade_date"].min().date()
     previous_state: dict[str, object] | None = None
@@ -705,18 +631,20 @@ def generate_strategy_state(
     if target_index == 0:
         raise ValueError("cannot build strategy state for the first available trade date")
     signal_date = trade_dates[target_index - 1]
-    universe = _resolve_score_universe(config, scores, as_of_date=signal_date)
+    universe = resolve_score_universe(config, scores, as_of_date=signal_date)
     LOGGER.info(
         "generate strategy state resolved signal_date=%s universe_size=%s target_trade_date=%s",
         signal_date.isoformat(),
         len(universe),
         target_trade_date.isoformat(),
     )
-    provider.preload(
-        symbols=universe,
+    provider = build_preloaded_score_provider(
+        storage_root=config.storage_root,
+        universe=universe,
         start_date=replay_start_date,
         end_date=target_trade_date,
         lookback=strategy.metadata.lookback_window,
+        provider=provider,
     )
 
     engine = BacktestEngine(provider)
@@ -808,7 +736,7 @@ def generate_strategy_state(
                 cash=cash,
                 positions=positions,
                 pending_orders=pending_orders,
-                config=_build_backtest_config(config, universe, trade_date_item),
+                config=build_score_backtest_config(config, universe, trade_date_item, trade_date_item),
             )
             trade_log.extend(pending_trades)
             if bootstrap_allocation is not None and trade_date_item == state["as_of_trade_date"]:
@@ -818,7 +746,7 @@ def generate_strategy_state(
                     cash=cash,
                     positions=positions,
                     allocation=bootstrap_allocation,
-                    config=_build_backtest_config(config, universe, trade_date_item),
+                    config=build_score_backtest_config(config, universe, trade_date_item, trade_date_item),
                 )
                 trade_log.extend(fill_trades)
                 pending_orders = engine._build_pending_orders(
@@ -879,7 +807,7 @@ def generate_strategy_state(
                     cash=cash,
                     positions=positions,
                     allocation=allocation,
-                    config=_build_backtest_config(config, universe, trade_date_item),
+                    config=build_score_backtest_config(config, universe, trade_date_item, trade_date_item),
                 )
                 trade_log.extend(fill_trades)
                 pending_orders = engine._build_pending_orders(
@@ -986,7 +914,7 @@ def generate_strategy_state(
                 cash=model_cash,
                 positions=model_positions,
                 allocation=last_allocation,
-                config=_build_backtest_config(config, universe, target_trade_date),
+                config=build_score_backtest_config(config, universe, target_trade_date, target_trade_date),
             )
             trade_log.extend(next_fill_trades)
             next_pending_orders = engine._build_pending_orders(
@@ -1263,7 +1191,7 @@ def analyze_start_date_robustness(
 
     scores["trade_date"] = pd.to_datetime(scores["trade_date"])
     provider = provider or ParquetDataProvider(config.storage_root)
-    strategy = _build_score_strategy(config)
+    strategy = build_score_strategy(config)
 
     earliest_score_date = scores["trade_date"].min().date()
     latest_score_date = scores["trade_date"].max().date()
@@ -1277,12 +1205,14 @@ def analyze_start_date_robustness(
         raise ValueError("no open trade dates within analysis window")
 
     sample_anchor_date = candidate_trade_dates[0]
-    universe = _resolve_score_universe(config, scores, as_of_date=sample_anchor_date)
-    provider.preload(
-        symbols=universe,
+    universe = resolve_score_universe(config, scores, as_of_date=sample_anchor_date)
+    provider = build_preloaded_score_provider(
+        storage_root=config.storage_root,
+        universe=universe,
         start_date=earliest_score_date,
         end_date=candidate_end,
         lookback=strategy.metadata.lookback_window,
+        provider=provider,
     )
 
     sampled_starts = _sample_robustness_start_dates(candidate_trade_dates, config.cadence)
@@ -1294,19 +1224,8 @@ def analyze_start_date_robustness(
         if end_trade_date is None or end_trade_date <= start_trade_date:
             continue
 
-        run_strategy = _build_score_strategy(config)
-        backtest = BacktestConfig(
-            strategy_path="__model_score__",
-            start_date=start_trade_date,
-            end_date=end_trade_date,
-            universe=universe,
-            initial_cash=config.initial_cash,
-            commission_rate=config.commission_rate,
-            stamp_tax_rate=config.stamp_tax_rate,
-            slippage_rate=config.slippage_rate,
-            max_trade_participation_rate=config.max_trade_participation_rate,
-            max_pending_days=config.max_pending_days,
-        )
+        run_strategy = build_score_strategy(config)
+        backtest = build_score_backtest_config(config, universe, start_trade_date, end_trade_date)
         result = engine.run_with_strategy(backtest, run_strategy)
         result_rows.append(
             {
