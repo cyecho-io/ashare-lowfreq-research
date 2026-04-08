@@ -19,6 +19,7 @@ class ResearchRunConfig:
     factor_end_date: str
     label_column: str
     train_window_months: int
+    validation_window_months: int
     test_start_month: str
     test_end_month: str
     score_output_path: str
@@ -62,6 +63,15 @@ class ResearchRunConfig:
     max_pending_days: int
 
 
+@dataclass(frozen=True)
+class ResearchRunOutputPaths:
+    factor_snapshot_path: str
+    score_output_path: str
+    metric_output_path: str
+    layer_output_path: str
+    model_backtest_output_dir: str
+
+
 def resolve_research_config_path(config_path: str | Path = "", factor_spec_id: str = "") -> Path:
     if config_path:
         return Path(config_path).resolve()
@@ -76,6 +86,17 @@ def resolve_research_config_path(config_path: str | Path = "", factor_spec_id: s
 def resolve_dated_output_path(base_path: str | Path, as_of_date: str) -> str:
     path = Path(base_path)
     return path.with_name(f"{path.stem}_{as_of_date}{path.suffix}").as_posix()
+
+
+def resolve_research_run_output_paths(config: ResearchRunConfig, output_dir: str | Path) -> ResearchRunOutputPaths:
+    root = Path(output_dir)
+    return ResearchRunOutputPaths(
+        factor_snapshot_path=(root / Path(config.factor_snapshot_path).name).as_posix(),
+        score_output_path=(root / Path(config.score_output_path).name).as_posix(),
+        metric_output_path=(root / Path(config.metric_output_path).name).as_posix(),
+        layer_output_path=(root / Path(config.layer_output_path).name).as_posix(),
+        model_backtest_output_dir=(root / "model_backtest").as_posix(),
+    )
 
 
 def load_research_config(path: str | Path) -> ResearchRunConfig:
@@ -112,6 +133,7 @@ def load_research_config(path: str | Path) -> ResearchRunConfig:
         factor_end_date=factor_as_of_date,
         label_column=str(training.get("label_column", "excess_fwd_return_5")),
         train_window_months=int(training.get("train_window_months", 12)),
+        validation_window_months=int(training.get("validation_window_months", 1)),
         test_start_month=str(training["test_start_month"]),
         test_end_month=str(training["test_end_month"]),
         score_output_path=str(training["score_output_path"]),

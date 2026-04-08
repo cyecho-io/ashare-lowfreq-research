@@ -148,6 +148,8 @@ class StrategyStateConfig(PremarketReferenceConfig):
     mode: str = "continue"
     previous_state_path: str = ""
     simulate_trade_execution: bool = True
+    write_trade_log: bool = True
+    write_decision_log: bool = True
 
 
 def _serialize_positions(positions: dict[str, Position], portfolio_value: float) -> list[dict[str, object]]:
@@ -1029,8 +1031,10 @@ def generate_strategy_state(
     target = Path(config.output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    _write_trade_log(target.with_name("trades.csv"), trade_log)
-    _write_decision_log(target.with_name("decision_log.csv"), decision_log)
+    if config.write_trade_log:
+        _write_trade_log(target.with_name("trades.csv"), trade_log)
+    if config.write_decision_log:
+        _write_decision_log(target.with_name("decision_log.csv"), decision_log)
     LOGGER.info(
         "generate strategy state complete output=%s mode=%s decision_reason=%s selected=%s current_positions=%s target_positions=%s",
         target.as_posix(),

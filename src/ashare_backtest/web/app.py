@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import logging
 import os
@@ -8,6 +9,8 @@ import re
 import sqlite3
 import threading
 import tempfile
+import tomllib
+from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -25,9 +28,17 @@ from ashare_backtest.research.services import (
     ModelBacktestServiceConfig,
     generate_strategy_state_from_config_service,
     run_model_backtest_service,
+    train_walk_forward_as_of_date_from_config_service,
+    train_walk_forward_history_from_config_service,
     train_walk_forward_single_date_from_config_service,
 )
-from ashare_backtest.cli.research_config import ResearchRunConfig, load_research_config, resolve_dated_output_path
+from ashare_backtest.cli.commands.research import resolve_month_range_output_path, run_research_pipeline
+from ashare_backtest.cli.research_config import (
+    ResearchRunConfig,
+    load_research_config,
+    resolve_dated_output_path,
+    resolve_research_run_output_paths,
+)
 from ashare_backtest.factors import FactorBuildConfig, FactorBuilder, resolve_factor_snapshot_path
 from ashare_backtest.logging_utils import configure_file_logging, get_logger
 from ashare_backtest.research import StrategyStateConfig, generate_strategy_state
@@ -36,12 +47,15 @@ from ashare_backtest.research.trainer import WalkForwardAsOfDateConfig, train_li
 # Backward-compatible aliases kept for local tests and patch points.
 generate_strategy_state_from_config = generate_strategy_state_from_config_service
 run_model_backtest = run_model_backtest_service
+train_walk_forward_as_of_date_from_config = train_walk_forward_as_of_date_from_config_service
+train_walk_forward_history_from_config = train_walk_forward_history_from_config_service
 train_walk_forward_single_date_from_config = train_walk_forward_single_date_from_config_service
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 RESULTS_ROOT = REPO_ROOT / "results"
 WEB_RUNS_ROOT = RESULTS_ROOT / "web_runs"
+RESEARCH_RUNS_ROOT = RESULTS_ROOT / "research_runs"
 PAPER_RUNS_ROOT = RESULTS_ROOT / "paper_runs"
 SIMULATION_ACCOUNTS_ROOT = RESULTS_ROOT / "simulation_accounts"
 SIMULATION_RUNS_ROOT = SIMULATION_ACCOUNTS_ROOT
@@ -498,28 +512,110 @@ def _iter_result_dirs(results_root: Path) -> list[Path]:
     )
 
 
+def _iter_research_run_dirs(results_root: Path = RESEARCH_RUNS_ROOT) -> list[Path]:
+    if not results_root.exists():
+        return []
+    return sorted(
+        [path for path in results_root.iterdir() if path.is_dir() and (path / "meta.json").exists()],
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _research_run_id_from_scores_path(
+    scores_path: str,
+    *,
+    repo_root: Path = REPO_ROOT,
+    results_root: Path = RESEARCH_RUNS_ROOT,
+) -> str:
+    normalized = str(scores_path).strip()
+    if not normalized:
+        return ""
+    score_file = Path(normalized)
+    if not score_file.is_absolute():
+        score_file = (repo_root / score_file).resolve()
+    if not score_file.exists():
+        return ""
+    for run_dir in _iter_research_run_dirs(results_root):
+        try:
+            score_file.resolve().relative_to(run_dir.resolve())
+            return run_dir.name
+        except ValueError:
+            continue
+    return ""
+
+
+def _resolve_backtest_output_dir(scores_path: str, run_name: str, repo_root: Path = REPO_ROOT) -> tuple[str, str]:
+    research_run_id = _research_run_id_from_scores_path(
+        scores_path,
+        repo_root=repo_root,
+        results_root=repo_root / "results" / "research_runs",
+    )
+    if research_run_id:
+        output_dir = repo_root / "results" / "research_runs" / research_run_id / "backtests" / run_name
+    else:
+        output_dir = repo_root / "results" / "web_runs" / run_name
+    return output_dir.relative_to(repo_root).as_posix(), research_run_id
+
+
 def list_score_parquet_files(
     models_root: Path = REPO_ROOT / "research" / "models",
     *,
     include_single_day: bool = True,
     configured_paths: list[str] | None = None,
+    research_runs_root: Path | None = None,
 ) -> list[dict[str, str]]:
+    repo_root = models_root.parents[1] if models_root.name == "models" and models_root.parent.name == "research" else REPO_ROOT
+    resolved_research_runs_root = research_runs_root or (repo_root / "results" / "research_runs")
+
+    def _resolve_local_path(path_text: str) -> Path:
+        path = Path(path_text)
+        if path.is_absolute():
+            return path
+        return (repo_root / path).resolve()
+
+    def _display_local_path(path: Path) -> str:
+        try:
+            return path.resolve().relative_to(repo_root).as_posix()
+        except ValueError:
+            return path.resolve().as_posix()
+
     manifest = load_score_source_manifest()
     files: list[dict[str, str]] = []
     candidate_paths: list[Path] = []
+    explicit_score_paths: set[str] = set()
     if models_root.exists():
         candidate_paths.extend(path for path in models_root.rglob("*.parquet"))
+    if resolved_research_runs_root.exists():
+        for run_dir in _iter_research_run_dirs(resolved_research_runs_root):
+            meta_path = run_dir / "meta.json"
+            if not meta_path.exists():
+                continue
+            try:
+                payload = json.loads(meta_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            normalized = str(payload.get("scores_path") or "").strip()
+            if not normalized:
+                continue
+            resolved = _resolve_local_path(normalized)
+            if resolved.exists() and resolved.is_file() and resolved.suffix == ".parquet":
+                candidate_paths.append(resolved)
+                explicit_score_paths.add(_display_local_path(resolved))
     for configured_path in configured_paths or []:
         normalized = str(configured_path).strip()
         if not normalized:
             continue
-        resolved = _resolve_repo_path(normalized)
+        resolved = _resolve_local_path(normalized)
         if resolved.exists() and resolved.is_file() and resolved.suffix == ".parquet":
             candidate_paths.append(resolved)
+            explicit_score_paths.add(_display_local_path(resolved))
     for path in candidate_paths:
-        if not path.is_file() or "scores" not in path.name:
+        if not path.is_file():
             continue
-        display_path = _display_path(path)
+        display_path = _display_local_path(path)
+        if "scores" not in path.name and display_path not in explicit_score_paths:
+            continue
         start_date, end_date = _score_date_range(path)
         item = {
             "path": display_path,
@@ -713,6 +809,9 @@ def fill_scores_to_signal_date(
                     label_column=str(manifest.get("label_column") or config.label_column).strip(),
                     as_of_date=missing_date,
                     train_window_months=int(manifest.get("train_window_months") or config.train_window_months),
+                    validation_window_months=int(
+                        manifest.get("validation_window_months") or config.validation_window_months
+                    ),
                 )
             )
             scored_parts.append(pd.read_parquet(temp_scores_path))
@@ -1116,6 +1215,43 @@ def list_strategy_presets(config_root: Path = CONFIG_ROOT) -> list[StrategyPrese
     return presets
 
 
+def list_research_strategy_presets(config_root: Path = CONFIG_ROOT) -> list[dict[str, Any]]:
+    presets: list[dict[str, Any]] = []
+    for path in sorted(config_root.glob("*.toml")):
+        try:
+            config = load_research_config(path)
+        except Exception:
+            continue
+        presets.append(
+            {
+                "id": path.stem,
+                "name": path.stem.replace("_", " "),
+                "config_path": _display_path(path),
+                "factor_spec_id": config.factor_spec_id,
+                "factor_panel_path": config.factor_snapshot_path,
+                "label_column": config.label_column,
+                "train_window_months": config.train_window_months,
+                "validation_window_months": config.validation_window_months,
+                "test_start_month": config.test_start_month,
+                "test_end_month": config.test_end_month,
+                "score_output_path": config.score_output_path,
+                "metric_output_path": config.metric_output_path,
+            }
+        )
+    return presets
+
+
+def load_research_config_text(config_path: str, repo_root: Path = REPO_ROOT) -> dict[str, str]:
+    absolute_path = (repo_root / config_path).resolve()
+    if not absolute_path.exists():
+        raise FileNotFoundError(f"config not found: {config_path}")
+    return {
+        "config_path": _display_path(absolute_path),
+        "name": absolute_path.stem.replace("_", " "),
+        "content": absolute_path.read_text(encoding="utf-8"),
+    }
+
+
 def build_dashboard_summary(
     *,
     repo_root: Path = REPO_ROOT,
@@ -1279,6 +1415,7 @@ def load_run_detail(
     score_end_date = ""
     if scores_path:
         score_start_date, score_end_date = _score_date_range(_resolve_repo_path(scores_path))
+    meta = _read_optional_json(target / "meta.json")
     return {
         "id": safe_run_id,
         "name": safe_run_id,
@@ -1294,11 +1431,74 @@ def load_run_detail(
         "benchmark_curve": benchmark_curve,
         "strategy_state": strategy_state,
         "trades": trades,
+        "meta": meta,
+        "source_research_run_id": str(meta.get("source_research_run_id") or ""),
+        "source_scores_path": str(meta.get("source_scores_path") or scores_path),
+        "source_run_type": str(meta.get("source_run_type") or "web_run"),
     }
 
 
 def _read_optional_json(path: Path) -> dict[str, Any]:
     return _read_json(path) if path.exists() else {}
+
+
+def _build_research_run_payload(run_id: str, target: Path, meta: dict[str, Any]) -> dict[str, Any]:
+    scores_path = str(meta.get("scores_path") or "").strip()
+    metrics_path = str(meta.get("metrics_path") or "").strip()
+    score_start_date = ""
+    score_end_date = ""
+    if scores_path:
+        resolved_scores_path = _resolve_repo_path(scores_path)
+        if resolved_scores_path.exists():
+            score_start_date, score_end_date = _score_date_range(resolved_scores_path)
+    return {
+        "id": run_id,
+        "name": str(meta.get("name") or run_id),
+        "result_dir": _display_path(target),
+        "config_path": str(meta.get("config_path") or meta.get("source_config_path") or ""),
+        "config_snapshot_path": str(meta.get("config_snapshot_path") or ""),
+        "logs_path": str(meta.get("logs_path") or ""),
+        "factor_spec_id": str(meta.get("factor_spec_id") or ""),
+        "mode": str(meta.get("mode") or "run_research_config"),
+        "as_of_date": str(meta.get("as_of_date") or ""),
+        "test_month": str(meta.get("test_month") or ""),
+        "test_start_month": str(meta.get("test_start_month") or ""),
+        "test_end_month": str(meta.get("test_end_month") or ""),
+        "factor_panel_path": str(meta.get("factor_panel_path") or ""),
+        "scores_path": scores_path,
+        "metrics_path": metrics_path,
+        "score_start_date": score_start_date,
+        "score_end_date": score_end_date,
+        "metrics": meta.get("metrics", {}),
+        "layer_summary": meta.get("layer_summary", {}),
+        "logs": meta.get("logs", ""),
+        "created_at": str(meta.get("created_at") or ""),
+        "updated_at": datetime.fromtimestamp(target.stat().st_mtime).isoformat(timespec="seconds"),
+        "status": str(meta.get("status") or "completed"),
+    }
+
+
+def list_research_run_summaries(results_root: Path = RESEARCH_RUNS_ROOT) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    for entry in _iter_research_run_dirs(results_root):
+        meta = _read_optional_json(entry / "meta.json")
+        if not meta:
+            continue
+        runs.append(_build_research_run_payload(entry.name, entry, meta))
+    return runs
+
+
+def load_research_run_detail(run_id: str, results_root: Path = RESEARCH_RUNS_ROOT) -> dict[str, Any]:
+    safe_run_id = Path(run_id).name
+    target = results_root / safe_run_id
+    meta_path = target / "meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"research run not found: {run_id}")
+    try:
+        meta = _read_json(meta_path)
+    except Exception as exc:
+        raise FileNotFoundError(f"research run is unreadable: {run_id}") from exc
+    return _build_research_run_payload(safe_run_id, target, meta)
 
 
 def list_paper_trade_summaries(results_root: Path = PAPER_RUNS_ROOT) -> list[dict[str, Any]]:
@@ -1959,6 +2159,8 @@ def _build_strategy_state_args(
     mode: str = "historical",
     previous_state_path: str = "",
     simulate_trade_execution: bool = True,
+    write_trade_log: bool = True,
+    write_decision_log: bool = True,
 ) -> StrategyStateConfig:
     return StrategyStateConfig(
         scores_path=scores_path,
@@ -1969,6 +2171,8 @@ def _build_strategy_state_args(
         mode=mode,
         previous_state_path=previous_state_path,
         simulate_trade_execution=simulate_trade_execution,
+        write_trade_log=write_trade_log,
+        write_decision_log=write_decision_log,
         top_k=config.top_k,
         rebalance_every=config.rebalance_every,
         lookback_window=config.lookback_window,
@@ -2031,6 +2235,8 @@ def _build_strategy_state_snapshot(
             trade_date=latest_trade_date,
             initial_cash=initial_cash,
             output_path=(output_dir / "strategy_state_latest.json").as_posix(),
+            write_trade_log=False,
+            write_decision_log=False,
         )
     )
 
@@ -2058,7 +2264,11 @@ class BacktestWebApp:
         resolved_scores_path = scores_path or config.score_output_path
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         run_name = f"{timestamp}-{_slugify(label or absolute_config.stem)}"
-        output_dir = (WEB_RUNS_ROOT / run_name).relative_to(self.repo_root).as_posix()
+        output_dir, source_research_run_id = _resolve_backtest_output_dir(
+            resolved_scores_path,
+            run_name,
+            repo_root=self.repo_root,
+        )
         job_id = run_name
         job_payload = {
             "id": job_id,
@@ -2069,12 +2279,60 @@ class BacktestWebApp:
             "initial_cash": initial_cash,
             "scores_path": resolved_scores_path,
             "result_dir": output_dir,
+            "source_research_run_id": source_research_run_id,
+            "source_run_type": "research_run_backtest" if source_research_run_id else "web_run",
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "error": "",
         }
         self.job_store.create(job_id, job_payload)
         args = _build_run_args(config, start_date, end_date, initial_cash, output_dir, scores_path=resolved_scores_path)
-        self.executor.submit(self._run_job, job_id, args, config, initial_cash, resolved_scores_path)
+        self.executor.submit(
+            self._run_job,
+            job_id,
+            args,
+            config,
+            initial_cash,
+            resolved_scores_path,
+            source_research_run_id,
+        )
+        return job_payload
+
+    def submit_research_config_run(
+        self,
+        config_path: str,
+        config_text: str,
+    ) -> dict[str, Any]:
+        absolute_config = (self.repo_root / config_path).resolve()
+        if not absolute_config.exists():
+            raise FileNotFoundError(f"config not found: {config_path}")
+        config = load_research_config(absolute_config)
+        resolved_config_text = config_text or absolute_config.read_text(encoding="utf-8")
+        tomllib.loads(resolved_config_text)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        run_name = f"{timestamp}-{_slugify(absolute_config.stem)}-research"
+        output_dir = self.repo_root / "results" / "research_runs" / run_name
+        job_payload = {
+            "id": run_name,
+            "type": "research_config",
+            "status": "queued",
+            "config_path": _display_path(absolute_config),
+            "mode": "run_research_config",
+            "factor_panel_path": config.factor_snapshot_path,
+            "test_start_month": config.test_start_month,
+            "test_end_month": config.test_end_month,
+            "result_dir": _display_path(output_dir),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "error": "",
+            "logs": "",
+        }
+        self.job_store.create(run_name, job_payload)
+        self.executor.submit(
+            self._run_research_config_job,
+            run_name,
+            _display_path(absolute_config),
+            resolved_config_text,
+            output_dir,
+        )
         return job_payload
 
     def submit_paper_trade(
@@ -2455,6 +2713,7 @@ class BacktestWebApp:
         config: ResearchRunConfig,
         initial_cash: float,
         scores_path: str | None = None,
+        source_research_run_id: str = "",
     ) -> None:
         self.job_store.update(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
         try:
@@ -2506,6 +2765,28 @@ class BacktestWebApp:
                     output_dir=args["output_dir"],
                 )
                 _build_strategy_state_snapshot(config, initial_cash, output_dir, scores_path=scores_path)
+                (output_dir / "meta.json").write_text(
+                    json.dumps(
+                        {
+                            "id": job_id,
+                            "name": job_id,
+                            "config_path": "",
+                            "source_config_path": "",
+                            "scores_path": scores_path or args["scores_path"],
+                            "source_scores_path": scores_path or args["scores_path"],
+                            "source_research_run_id": source_research_run_id,
+                            "source_run_type": "research_run_backtest" if source_research_run_id else "web_run",
+                            "result_dir": args["output_dir"],
+                            "backtest_start_date": args["start_date"],
+                            "backtest_end_date": args["end_date"],
+                            "initial_cash": args["initial_cash"],
+                            "created_at": datetime.now().isoformat(timespec="seconds"),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
             finally:
                 os.chdir(cwd)
             self.job_store.update(
@@ -2566,6 +2847,91 @@ class BacktestWebApp:
             self.job_store.update(
                 job_id,
                 status="completed",
+                finished_at=datetime.now().isoformat(timespec="seconds"),
+            )
+        except Exception as exc:
+            self.job_store.update(
+                job_id,
+                status="failed",
+                error=str(exc),
+                finished_at=datetime.now().isoformat(timespec="seconds"),
+            )
+
+    def _run_research_config_job(
+        self,
+        job_id: str,
+        config_path: str,
+        config_text: str,
+        output_dir: Path,
+    ) -> None:
+        self.job_store.update(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            config_snapshot_path = output_dir / "config.toml"
+            logs_path = output_dir / "logs.txt"
+            config_snapshot_path.write_text(config_text, encoding="utf-8")
+            config = load_research_config(config_snapshot_path)
+            run_output_paths = resolve_research_run_output_paths(config, output_dir)
+            log_buffer = io.StringIO()
+
+            class _JobLogWriter:
+                def __init__(self, buffer: io.StringIO, job_store: JobStore, current_job_id: str, log_path: Path) -> None:
+                    self.buffer = buffer
+                    self.job_store = job_store
+                    self.current_job_id = current_job_id
+                    self.log_path = log_path
+
+                def write(self, text: str) -> int:
+                    written = self.buffer.write(text)
+                    self.log_path.write_text(self.buffer.getvalue(), encoding="utf-8")
+                    self.job_store.update(self.current_job_id, logs=self.buffer.getvalue())
+                    return written
+
+                def flush(self) -> None:
+                    self.log_path.write_text(self.buffer.getvalue(), encoding="utf-8")
+
+            with redirect_stdout(_JobLogWriter(log_buffer, self.job_store, job_id, logs_path)):
+                payload = run_research_pipeline(config_snapshot_path.as_posix(), output_dir=output_dir)
+
+            meta_payload = {
+                "name": Path(config_path).stem.replace("_", " "),
+                "status": "completed",
+                "config_path": config_path,
+                "source_config_path": config_path,
+                "config_snapshot_path": _display_path(config_snapshot_path),
+                "logs_path": _display_path(logs_path),
+                "mode": "run_research_config",
+                "factor_spec_id": config.factor_spec_id,
+                "test_start_month": config.test_start_month,
+                "test_end_month": config.test_end_month,
+                "factor_panel_path": str(payload.get("factor_path") or run_output_paths.factor_snapshot_path),
+                "scores_path": str(payload.get("scores_path") or run_output_paths.score_output_path),
+                "metrics_path": str(payload.get("metrics_path") or run_output_paths.metric_output_path),
+                "layer_output_path": str(payload.get("layer_output_path") or run_output_paths.layer_output_path),
+                "model_backtest_output_dir": run_output_paths.model_backtest_output_dir,
+                "configured_factor_panel_path": config.factor_snapshot_path,
+                "configured_scores_path": config.score_output_path,
+                "configured_metrics_path": config.metric_output_path,
+                "configured_layer_output_path": config.layer_output_path,
+                "configured_model_backtest_output_dir": config.model_backtest_output_dir,
+                "metrics": payload.get("training_metrics", {}),
+                "layer_summary": payload.get("layer_summary", {}),
+                "logs": log_buffer.getvalue(),
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            (output_dir / "meta.json").write_text(
+                json.dumps(
+                    meta_payload,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            self.job_store.update(
+                job_id,
+                status="completed",
+                result={"run_id": job_id},
+                logs=log_buffer.getvalue(),
                 finished_at=datetime.now().isoformat(timespec="seconds"),
             )
         except Exception as exc:
@@ -2856,6 +3222,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/backtest":
             self._serve_file(STATIC_ROOT / "index.html", "text/html; charset=utf-8")
             return
+        if path == "/research":
+            self._serve_file(STATIC_ROOT / "research.html", "text/html; charset=utf-8")
+            return
         if path == "/dashboard":
             self._serve_file(STATIC_ROOT / "dashboard.html", "text/html; charset=utf-8")
             return
@@ -2882,6 +3251,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                     ),
                 }
             )
+            return
+        if path == "/api/research/configs":
+            self._send_json({"configs": list_research_strategy_presets(config_root=self.app.repo_root / "configs")})
             return
         if path == "/api/paper/strategies":
             presets = [preset.__dict__ for preset in list_strategy_presets()]
@@ -2941,6 +3313,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/runs":
             self._send_json({"runs": list_run_summaries()[:40]})
+            return
+        if path == "/api/research/runs":
+            self._send_json({"runs": list_research_run_summaries()[:40]})
             return
         if path == "/api/paper/runs":
             self._send_json({"runs": list_paper_trade_summaries()[:40]})
@@ -3034,6 +3409,28 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(detail)
             return
+        if path.startswith("/api/research/runs/"):
+            run_id = path.split("/api/research/runs/", 1)[1]
+            try:
+                detail = load_research_run_detail(run_id)
+            except FileNotFoundError:
+                self._send_json({"error": "research_run_not_found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._send_json(detail)
+            return
+        if path.startswith("/api/research/configs/"):
+            config_id = Path(path.split("/api/research/configs/", 1)[1]).name
+            if not config_id:
+                self._send_json({"error": "config_not_found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            try:
+                config_path = (self.app.repo_root / "configs" / f"{config_id}.toml").relative_to(self.app.repo_root).as_posix()
+                payload = load_research_config_text(config_path, repo_root=self.app.repo_root)
+            except (FileNotFoundError, ValueError):
+                self._send_json({"error": "config_not_found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._send_json(payload)
+            return
         if path.startswith("/api/paper/runs/"):
             run_id = path.split("/api/paper/runs/", 1)[1]
             try:
@@ -3073,6 +3470,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 run_id = Path(result_dir).name
                 try:
                     payload["run"] = load_run_detail(run_id)
+                except FileNotFoundError:
+                    pass
+            self._send_json(payload)
+            return
+        if path.startswith("/api/research/jobs/"):
+            job_id = path.split("/api/research/jobs/", 1)[1]
+            job = self.app.job_store.get(job_id)
+            if job is None or job.get("type") not in {"research_walk_forward", "research_single_date", "research_config"}:
+                self._send_json({"error": "job_not_found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            payload = {"job": job}
+            if job.get("status") == "completed":
+                try:
+                    payload["run"] = load_research_run_detail(job_id)
                 except FileNotFoundError:
                     pass
             self._send_json(payload)
@@ -3120,6 +3531,23 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/research/jobs":
+            body = self._read_json_body()
+            config_path = str(body.get("config_path", "")).strip()
+            config_text = str(body.get("config_text", ""))
+            if not config_path:
+                self._send_json({"error": "missing_required_fields"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                job = self.app.submit_research_config_run(
+                    config_path=config_path,
+                    config_text=config_text,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json({"job": job}, status=HTTPStatus.ACCEPTED)
+            return
         if parsed.path == "/api/simulation/plans":
             body = self._read_json_body()
             config_path = str(body.get("config_path", "")).strip()
@@ -3285,7 +3713,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
-def create_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
+def create_server(host: str = "127.0.0.1", port: int = 8888) -> ThreadingHTTPServer:
     app = BacktestWebApp()
     server = ThreadingHTTPServer((host, port), RequestHandler)
     server.app = app  # type: ignore[attr-defined]
@@ -3294,7 +3722,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPSer
 
 def main() -> None:
     host = os.environ.get("ASHARE_WEB_HOST", "127.0.0.1")
-    port = int(os.environ.get("ASHARE_WEB_PORT", "8765"))
+    port = int(os.environ.get("ASHARE_WEB_PORT", "8888"))
     log_path = configure_file_logging(level=logging.INFO)
     server = create_server(host=host, port=port)
     print(f"ASHARE_WEB http://{host}:{port}")

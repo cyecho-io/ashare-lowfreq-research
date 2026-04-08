@@ -10,7 +10,7 @@ from .tushare_sync import (
     TushareSyncSummary,
     resolve_tushare_token,
 )
-from .universe import load_universe_symbols
+from .universe import filter_universe_frame, load_universe_symbols
 
 __all__ = [
     "DEFAULT_SQLITE_SOURCE",
@@ -25,6 +25,7 @@ __all__ = [
     "TushareClient",
     "TushareSQLiteSync",
     "TushareSyncSummary",
+    "filter_universe_frame",
     "load_universe_symbols",
     "resolve_tushare_token",
 ]

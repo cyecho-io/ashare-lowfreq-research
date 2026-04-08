@@ -65,6 +65,40 @@ function activePreset() {
   return state.strategies.find((item) => item.config_path === els.strategySelect.value) || null;
 }
 
+function applyQueryPrefill() {
+  const params = new URLSearchParams(window.location.search);
+  const configPath = params.get("config_path") || "";
+  const scoresPath = params.get("scores_path") || "";
+
+  // 先设置策略配置
+  if (configPath && state.strategies.some((item) => item.config_path === configPath)) {
+    els.strategySelect.value = configPath;
+  }
+
+  // 根据选中的策略更新分数文件列表
+  applyPresetDefaults();
+
+  // 再尝试设置分数文件（如果 URL 中指定了）
+  if (scoresPath) {
+    // 检查是否已在选项中
+    const optionExists = Array.from(els.scoreFileSelect.options).some((item) => item.value === scoresPath);
+    if (optionExists) {
+      els.scoreFileSelect.value = scoresPath;
+    } else {
+      // 如果不在选项中，先添加到列表（来自研究台的 scores 文件）
+      const scoreFile = state.scoreFiles.find((item) => item.path === scoresPath);
+      if (scoreFile) {
+        const option = document.createElement("option");
+        option.value = scoreFile.path;
+        option.textContent = scoreFile.path;
+        els.scoreFileSelect.appendChild(option);
+        els.scoreFileSelect.value = scoresPath;
+      }
+    }
+    applyScoreFileDates();
+  }
+}
+
 function scoreFileOptionsForPreset(preset) {
   if (!preset) return [];
   const byPath = new Map(state.scoreFiles.map((item) => [item.path, item]));
@@ -82,7 +116,10 @@ function scoreFileOptionsForPreset(preset) {
 }
 
 function activeScoreFile() {
-  return scoreFileOptionsForPreset(activePreset()).find((item) => item.path === els.scoreFileSelect.value) || null;
+  const fromPreset = scoreFileOptionsForPreset(activePreset()).find((item) => item.path === els.scoreFileSelect.value);
+  if (fromPreset) return fromPreset;
+  // 如果不在 preset 选项中，从全局 scoreFiles 查找
+  return state.scoreFiles.find((item) => item.path === els.scoreFileSelect.value) || null;
 }
 
 function renderPresetMeta() {
@@ -361,6 +398,7 @@ function bindEvents() {
 async function init() {
   bindEvents();
   await loadStrategies();
+  applyQueryPrefill();
   await loadRuns(true);
 }
 

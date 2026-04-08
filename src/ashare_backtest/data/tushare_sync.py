@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 import gzip
+from http.client import IncompleteRead
 import json
 import os
 from pathlib import Path
+import time
 import sqlite3
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -17,6 +19,10 @@ DEFAULT_TUSHARE_API_URL = "http://api.waditu.com/dataapi"
 ALL_ACTIVE_UNIVERSE = "all_active"
 DEFAULT_BENCHMARK_SYMBOL = "000300.SH"
 DEFAULT_BENCHMARK_OUTPUT = "storage/parquet/benchmarks/000300.SH.parquet"
+DEFAULT_TUSHARE_MAX_RETRIES = 5
+DEFAULT_TUSHARE_RETRY_DELAY_SECONDS = 2.0
+DEFAULT_SQLITE_COMMIT_INTERVAL = 20
+RETRYABLE_HTTP_STATUS_CODES = {429, 502, 503, 504}
 
 
 @dataclass(frozen=True)
@@ -40,10 +46,19 @@ class TushareBenchmarkSyncSummary:
 
 
 class TushareClient:
-    def __init__(self, token: str, timeout: int = 60, api_url: str = DEFAULT_TUSHARE_API_URL) -> None:
+    def __init__(
+        self,
+        token: str,
+        timeout: int = 60,
+        api_url: str = DEFAULT_TUSHARE_API_URL,
+        max_retries: int = DEFAULT_TUSHARE_MAX_RETRIES,
+        retry_delay_seconds: float = DEFAULT_TUSHARE_RETRY_DELAY_SECONDS,
+    ) -> None:
         self.token = token
         self.timeout = timeout
         self.api_url = api_url.rstrip("/")
+        self.max_retries = max(1, max_retries)
+        self.retry_delay_seconds = max(0.0, retry_delay_seconds)
         self.headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -64,18 +79,27 @@ class TushareClient:
             headers=self.headers,
             method="POST",
         )
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                raw = response.read()
-                encoding = response.headers.get("Content-Encoding", "")
-                if "gzip" in encoding:
-                    raw = gzip.decompress(raw)
-                text = raw.decode("utf-8")
-        except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Tushare HTTP error on {api_name}: {exc.code} {body}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"Tushare network error on {api_name}: {exc.reason}") from exc
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    raw = response.read()
+                    encoding = response.headers.get("Content-Encoding", "")
+                    if "gzip" in encoding:
+                        raw = gzip.decompress(raw)
+                    text = raw.decode("utf-8")
+                break
+            except HTTPError as exc:
+                if exc.code in RETRYABLE_HTTP_STATUS_CODES and attempt < self.max_retries:
+                    exc.read()
+                    time.sleep(self.retry_delay_seconds * attempt)
+                    continue
+                body = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"Tushare HTTP error on {api_name}: {exc.code} {body}") from exc
+            except (URLError, IncompleteRead) as exc:
+                if attempt >= self.max_retries:
+                    detail = exc.reason if isinstance(exc, URLError) else str(exc)
+                    raise RuntimeError(f"Tushare network error on {api_name}: {detail}") from exc
+                time.sleep(self.retry_delay_seconds * attempt)
 
         result = json.loads(text)
         if result.get("code") != 0:
@@ -143,9 +167,15 @@ class TushareClient:
 
 
 class TushareSQLiteSync:
-    def __init__(self, sqlite_path: str | Path, client: TushareClient) -> None:
+    def __init__(
+        self,
+        sqlite_path: str | Path,
+        client: TushareClient,
+        commit_interval: int = DEFAULT_SQLITE_COMMIT_INTERVAL,
+    ) -> None:
         self.sqlite_path = Path(sqlite_path)
         self.client = client
+        self.commit_interval = max(1, commit_interval)
 
     def sync(self, start_date: str | None = None, end_date: str | None = None) -> TushareSyncSummary:
         resolved_start, resolved_end = self._resolve_window(start_date, end_date)
@@ -156,11 +186,14 @@ class TushareSQLiteSync:
             instruments = self._fetch_all_stock_basic()
             self._upsert_instruments(conn, instruments)
             self._refresh_all_active_universe(conn, instruments.loc[instruments["is_active"]].copy())
+            conn.commit()
 
             open_dates = calendar.loc[calendar["is_open"], "trade_date"].tolist()
             daily_rows = 0
-            for trade_date_item in open_dates:
+            for index, trade_date_item in enumerate(open_dates, start=1):
                 daily_rows += self._sync_trade_date(conn, trade_date_item)
+                if index % self.commit_interval == 0:
+                    conn.commit()
 
             conn.commit()
 

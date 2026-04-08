@@ -137,6 +137,168 @@ h1 {
   align-items: start;
 }
 
+/* Research page - new layout: records + summary as core, config collapsible, log dynamic */
+.research-grid {
+  grid-template-columns: minmax(320px, 0.6fr) minmax(400px, 1fr);
+  grid-template-areas:
+    "config config"
+    "records summary"
+    "logs logs";
+}
+
+/* Collapsible config panel - default collapsed */
+.control-panel {
+  grid-area: control;
+  min-height: auto;
+}
+
+.control-panel.collapsed {
+  min-height: auto;
+}
+
+.control-panel.collapsed .collapsible-body {
+  display: none;
+}
+
+.collapsible-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+  padding: 20px 22px 12px;
+}
+
+.collapsible-header:hover .collapse-toggle {
+  background: rgba(37, 58, 82, 0.08);
+}
+
+.collapse-toggle {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid rgba(37, 58, 82, 0.14);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--accent);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 200ms ease, background 200ms ease;
+}
+
+.collapse-toggle:hover {
+  background: rgba(37, 58, 82, 0.12);
+}
+
+.control-panel.collapsed .collapse-icon {
+  transform: rotate(-90deg);
+}
+
+.collapse-icon {
+  display: inline-block;
+  transition: transform 200ms ease;
+  font-size: 12px;
+}
+
+.collapsible-body {
+  animation: expand-in 200ms ease;
+}
+
+@keyframes expand-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Compact research form layout */
+.research-form-compact {
+  padding: 4px 22px 22px;
+  display: grid;
+  gap: 14px;
+}
+
+.research-form-top {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.config-select-label {
+  margin: 0;
+}
+
+.research-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.research-actions .secondary-button,
+.research-actions .primary-button {
+  white-space: nowrap;
+}
+
+.research-form-compact .code-editor {
+  min-height: 280px;
+}
+
+/* Records panel - core left side */
+.records-panel {
+  grid-area: records;
+  max-height: none;
+}
+
+.records-panel .run-list {
+  max-height: 600px;
+  padding: 6px 14px 18px;
+}
+
+/* Summary panel - core right side */
+.summary-panel {
+  grid-area: summary;
+}
+
+.research-summary-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 18px 14px;
+}
+
+.research-backtest-row {
+  padding: 0 18px 18px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Log panel - dynamic, hidden by default */
+.runs-panel {
+  grid-area: runs;
+  min-height: auto;
+}
+
+.runs-panel.visible {
+  display: block !important;
+}
+
+.research-grid .control-panel {
+  grid-area: config;
+}
+
+.research-grid .runs-panel {
+  grid-area: logs;
+}
+
+.research-grid .runs-panel .terminal-output {
+  min-height: 200px;
+  max-height: 320px;
+}
+
 .dashboard-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
@@ -170,30 +332,9 @@ h1 {
   min-width: 0;
 }
 
-.control-panel,
-.runs-panel {
-  align-self: start;
-  min-width: 0;
-}
-
-.control-panel {
-  grid-area: control;
-}
-
-.runs-panel {
-  grid-area: runs;
-  position: sticky;
-  top: 18px;
-  min-height: 840px;
-}
-
 .summary-panel,
 .trades-panel {
   min-width: 0;
-}
-
-.summary-panel {
-  grid-area: summary;
 }
 
 .trades-panel {
@@ -216,6 +357,24 @@ h1 {
   min-width: 0;
   grid-template-columns: minmax(220px, 1.35fr) repeat(3, minmax(160px, 1fr));
   align-items: end;
+}
+
+.research-grid .form-stack {
+  grid-template-columns: minmax(240px, 0.9fr) auto;
+  align-items: start;
+}
+
+.research-grid .form-stack > label:first-child {
+  grid-column: 1 / 2;
+}
+
+.research-grid .form-stack > .paper-action-row {
+  grid-column: 2 / 3;
+  align-self: end;
+}
+
+.research-grid .form-stack > .code-shell {
+  grid-column: 1 / -1;
 }
 
 .form-row {
@@ -428,6 +587,162 @@ button:focus {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.code-shell {
+  min-width: 0;
+  border-radius: 22px;
+  overflow: hidden;
+  border: 1px solid rgba(24, 32, 45, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.code-shell-topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+}
+
+.code-shell-dots {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.code-shell-dots span {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.code-shell-dots span:nth-child(1) {
+  background: #f07b72;
+}
+
+.code-shell-dots span:nth-child(2) {
+  background: #e1b85e;
+}
+
+.code-shell-dots span:nth-child(3) {
+  background: #68b66d;
+}
+
+.code-shell-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.code-shell-meta strong,
+.code-shell-meta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.code-shell-meta strong {
+  font-size: 13px;
+}
+
+.code-shell-meta span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.code-shell-badge {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.editor-shell {
+  background:
+    linear-gradient(180deg, rgba(255, 250, 244, 0.86), rgba(243, 236, 226, 0.98)),
+    var(--paper-strong);
+}
+
+.editor-shell .code-shell-topbar {
+  background: linear-gradient(180deg, rgba(233, 224, 212, 0.94), rgba(248, 243, 236, 0.8));
+  border-bottom: 1px solid rgba(31, 38, 51, 0.08);
+}
+
+.editor-shell .code-shell-badge {
+  background: rgba(37, 58, 82, 0.1);
+  color: var(--accent);
+}
+
+.terminal-shell {
+  background:
+    radial-gradient(circle at top, rgba(116, 149, 123, 0.12), transparent 36%),
+    linear-gradient(180deg, #0f151a 0%, #151d22 100%);
+  color: #d8e4d9;
+}
+
+.terminal-shell .code-shell-topbar {
+  background: linear-gradient(180deg, rgba(29, 39, 46, 0.98), rgba(21, 29, 34, 0.94));
+  border-bottom: 1px solid rgba(216, 228, 217, 0.08);
+}
+
+.terminal-shell .code-shell-meta strong {
+  color: #f0f6ee;
+}
+
+.terminal-shell .code-shell-meta span {
+  color: rgba(216, 228, 217, 0.68);
+}
+
+.terminal-shell .code-shell-badge {
+  background: rgba(104, 182, 109, 0.14);
+  color: #9cd99e;
+}
+
+.code-shell-body {
+  display: block;
+}
+
+.shell-accessible-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.code-editor,
+.terminal-output {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  font: 13px/1.68 "SFMono-Regular", "SF Mono", Menlo, Monaco, Consolas, monospace;
+}
+
+.code-editor {
+  min-height: 520px;
+  padding: 18px 20px 22px;
+  resize: vertical;
+  color: #2b3240;
+  tab-size: 2;
+}
+
+.code-editor:focus {
+  outline: none;
+}
+
+.terminal-output {
+  min-height: 540px;
+  max-height: 720px;
+  padding: 18px 20px 22px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #d8e4d9;
 }
 
 .simulation-toolbar-row {
@@ -838,6 +1153,31 @@ tbody tr:nth-child(odd) {
       "trades";
   }
 
+  .research-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "config"
+      "records"
+      "summary"
+      "logs";
+  }
+
+  .research-form-top {
+    grid-template-columns: 1fr;
+  }
+
+  .research-actions {
+    justify-content: stretch;
+  }
+
+  .research-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .records-panel .run-list {
+    max-height: 420px;
+  }
+
   .dashboard-grid {
     grid-template-columns: 1fr;
     grid-template-areas:
@@ -848,6 +1188,7 @@ tbody tr:nth-child(odd) {
 
   .runs-panel {
     position: static;
+    min-height: auto;
   }
 
   .summary-cards {
@@ -898,6 +1239,16 @@ tbody tr:nth-child(odd) {
   .paper-form > .paper-action-row {
     grid-column: 2 / 4;
   }
+
+  .research-grid .form-stack {
+    grid-template-columns: 1fr;
+  }
+
+  .research-grid .form-stack > label:first-child,
+  .research-grid .form-stack > .paper-action-row,
+  .research-grid .form-stack > .code-shell {
+    grid-column: auto;
+  }
 }
 
 @media (max-width: 720px) {
@@ -944,6 +1295,16 @@ tbody tr:nth-child(odd) {
   .paper-action-row {
     grid-template-columns: 1fr;
     width: 100%;
+  }
+
+  .code-shell-topbar {
+    align-items: start;
+    flex-wrap: wrap;
+  }
+
+  .code-editor,
+  .terminal-output {
+    min-height: 420px;
   }
 
   .chart-header,

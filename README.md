@@ -87,7 +87,7 @@ ashare-backtest run-research-config configs/demo_research.toml
 ashare-backtest-web
 ```
 
-然后打开 `http://127.0.0.1:8765`。
+然后打开 `http://127.0.0.1:8888`。
 
 这个 demo 路径会给你：
 
@@ -205,7 +205,7 @@ ashare-backtest run-model-backtest \
 ashare-backtest-web
 ```
 
-默认访问地址是 `http://127.0.0.1:8765`。
+默认访问地址是 `http://127.0.0.1:8888`。
 
 ## 数据同步
 
