@@ -184,13 +184,14 @@ def _filter_derived_universe_frame(
         raise ValueError("derived tradable universe filtering requires amount and is_suspended columns")
 
     working = working.sort_values(["symbol", date_column]).copy()
+    working["is_suspended"] = pd.Series(working["is_suspended"], index=working.index, dtype="boolean").fillna(False)
     working["listing_days"] = (working[date_column] - working["listing_date"]).dt.days
     grouped = working.groupby("symbol", group_keys=False)
     working["recent_trading_days"] = grouped[date_column].transform(
         lambda s: s.rolling(TRADABLE_RECENT_WINDOW, min_periods=1).count()
     )
     working["recent_suspended_days"] = grouped["is_suspended"].transform(
-        lambda s: s.fillna(False).astype(int).rolling(TRADABLE_RECENT_WINDOW, min_periods=1).sum()
+        lambda s: s.astype(int).rolling(TRADABLE_RECENT_WINDOW, min_periods=1).sum()
     )
     working["median_amount"] = grouped["amount"].transform(
         lambda s: s.rolling(TRADABLE_RECENT_WINDOW, min_periods=1).median()

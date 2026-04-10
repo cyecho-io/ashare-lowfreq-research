@@ -10,6 +10,7 @@ from ashare_backtest.cli.research_config import (
 )
 from ashare_backtest.factors import FactorBuildConfig, FactorBuilder
 from ashare_backtest.research import (
+    DEFAULT_FEATURE_COLUMNS,
     LayeredAnalysisConfig,
     PremarketReferenceConfig,
     StartDateRobustnessConfig,
@@ -82,6 +83,7 @@ def run_research_pipeline(config_path: str, output_dir: str | Path | None = None
             output_scores_path=score_output_path,
             output_metrics_path=metric_output_path,
             label_column=config.label_column,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
             train_window_months=config.train_window_months,
             validation_window_months=config.validation_window_months,
             test_start_month=config.test_start_month,
@@ -118,6 +120,9 @@ def run_research_pipeline(config_path: str, output_dir: str | Path | None = None
         f"output={layer_output_path}"
     )
     return {
+        "backend": "native",
+        "model": "lgbm",
+        "config_id": config.factor_spec_id,
         "config_path": resolved_config_path.as_posix(),
         "factor_path": factor_snapshot_path,
         "scores_path": score_output_path,

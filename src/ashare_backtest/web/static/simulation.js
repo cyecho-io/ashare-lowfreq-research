@@ -158,7 +158,7 @@ async function refreshReadiness() {
       config_path: els.strategySelect.value,
       signal_date: els.tradeDate.value,
     });
-    state.readiness = await fetchJson(`/api/simulation/readiness?${query.toString()}`);
+    state.readiness = await fetchJson(window.AshareWorkspace.withWorkspaceUrl(`/api/simulation/readiness?${query.toString()}`));
   } catch (error) {
     state.readiness = {
       is_ready: false,
@@ -472,7 +472,7 @@ function setActiveTab(tab) {
 }
 
 async function loadStrategies() {
-  const payload = await fetchJson("/api/simulation/strategies");
+  const payload = await fetchJson(window.AshareWorkspace.withWorkspaceUrl("/api/simulation/strategies"));
   state.strategies = payload.strategies;
   els.strategySelect.innerHTML = state.strategies
     .map((strategy) => `<option value="${strategy.config_path}">${strategy.name}</option>`)
@@ -483,7 +483,7 @@ async function loadStrategies() {
 
 async function reloadStrategiesPreservingSelection() {
   const selectedConfig = els.strategySelect.value;
-  const payload = await fetchJson("/api/simulation/strategies");
+  const payload = await fetchJson(window.AshareWorkspace.withWorkspaceUrl("/api/simulation/strategies"));
   state.strategies = payload.strategies;
   els.strategySelect.innerHTML = state.strategies
     .map((strategy) => `<option value="${strategy.config_path}">${strategy.name}</option>`)
@@ -495,7 +495,7 @@ async function reloadStrategiesPreservingSelection() {
 }
 
 async function loadRuns(selectFirst = true) {
-  const payload = await fetchJson("/api/simulation/plans");
+  const payload = await fetchJson(window.AshareWorkspace.withWorkspaceUrl("/api/simulation/plans"));
   state.runs = payload.plans;
   renderRuns();
   if (selectFirst && state.runs.length) {
@@ -516,7 +516,9 @@ async function loadHistory() {
   }
   try {
     const payload = await fetchJson(
-      `/api/simulation/history?strategy_id=${encodeURIComponent(run.strategy_id || "")}&run_id=${encodeURIComponent(runId)}`,
+      window.AshareWorkspace.withWorkspaceUrl(
+        `/api/simulation/history?strategy_id=${encodeURIComponent(run.strategy_id || "")}&run_id=${encodeURIComponent(runId)}`,
+      ),
     );
     state.activeHistory = payload;
     state.activeHistoryTrades = payload.trades || [];
@@ -542,7 +544,9 @@ async function loadLineage() {
   }
   try {
     const payload = await fetchJson(
-      `/api/simulation/lineage?strategy_id=${encodeURIComponent(run.strategy_id || "")}&run_id=${encodeURIComponent(runId)}`,
+      window.AshareWorkspace.withWorkspaceUrl(
+        `/api/simulation/lineage?strategy_id=${encodeURIComponent(run.strategy_id || "")}&run_id=${encodeURIComponent(runId)}`,
+      ),
     );
     state.activeLineage = payload;
     renderLineage();
@@ -554,7 +558,7 @@ async function loadLineage() {
 }
 
 async function loadRun(runId) {
-  const payload = await fetchJson(`/api/simulation/plans/${encodeURIComponent(runId)}`);
+  const payload = await fetchJson(window.AshareWorkspace.withWorkspaceUrl(`/api/simulation/plans/${encodeURIComponent(runId)}`));
   if (payload.config_path && els.strategySelect.value !== payload.config_path) {
     els.strategySelect.value = payload.config_path;
     applyPresetDefaults();
@@ -591,7 +595,7 @@ async function submitSimulation(event) {
     const payload = await fetchJson("/api/simulation/plans", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(window.AshareWorkspace.withWorkspaceBody(body)),
     });
     state.currentJobId = payload.job.id;
     pollJob();
@@ -617,7 +621,7 @@ async function submitNextPlan() {
     const payload = await fetchJson(`/api/simulation/plans/${encodeURIComponent(state.activeRun.id)}/next`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify(window.AshareWorkspace.withWorkspaceBody({})),
     });
     state.currentJobId = payload.job.id;
     pollJob();
@@ -649,9 +653,9 @@ async function submitRollForward() {
     const payload = await fetchJson(`/api/simulation/plans/${encodeURIComponent(state.activeRun.id)}/execute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(window.AshareWorkspace.withWorkspaceBody({
         label: state.activeRun.name || "",
-      }),
+      })),
     });
     state.currentJobId = payload.job.id;
     pollJob();
@@ -678,7 +682,9 @@ async function handlePrimaryAction() {
 async function pollJob() {
   if (!state.currentJobId) return;
   try {
-    const payload = await fetchJson(`/api/simulation/jobs/${encodeURIComponent(state.currentJobId)}`);
+    const payload = await fetchJson(
+      window.AshareWorkspace.withWorkspaceUrl(`/api/simulation/jobs/${encodeURIComponent(state.currentJobId)}`),
+    );
     const { job, run, plan } = payload;
     if (job.status === "queued") {
       els.jobStatus.textContent = "任务排队中，请稍候。";
@@ -771,9 +777,22 @@ function bindEvents() {
       await loadLineage();
     }
   });
+  window.addEventListener("workspacechange", async () => {
+    state.currentJobId = null;
+    state.activeRun = null;
+    state.activeHistory = null;
+    state.activeHistoryTrades = [];
+    state.activeLineage = null;
+    await reloadStrategiesPreservingSelection();
+    await refreshReadiness();
+    await loadRuns(true);
+    await loadHistory();
+    await loadLineage();
+  });
 }
 
 async function init() {
+  window.AshareWorkspace.initWorkspaceControls();
   bindEvents();
   els.tradeDate.value = formatDateInput();
   await loadStrategies();

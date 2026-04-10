@@ -19,6 +19,9 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
 ]
+qlib = [
+    "pyqlib>=0.9.6",
+]
 
 [project.scripts]
 ashare-backtest = "ashare_backtest.cli.main:main"

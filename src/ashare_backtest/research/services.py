@@ -16,6 +16,7 @@ from ashare_backtest.research.score_workflow import (
     load_score_symbols,
 )
 from ashare_backtest.research.trainer import (
+    DEFAULT_FEATURE_COLUMNS,
     WalkForwardAsOfDateConfig,
     WalkForwardConfig,
     WalkForwardSingleDateConfig,
@@ -143,6 +144,7 @@ def train_walk_forward_as_of_date_from_config_service(
             output_metrics_path=resolved_metrics_path,
             label_column=config.label_column,
             as_of_date=resolved_as_of_date,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
             train_window_months=config.train_window_months,
             validation_window_months=config.validation_window_months,
         )
@@ -177,6 +179,7 @@ def train_walk_forward_history_from_config_service(
             output_scores_path=resolved_scores_path,
             output_metrics_path=resolved_metrics_path,
             label_column=config.label_column,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
             train_window_months=config.train_window_months,
             validation_window_months=config.validation_window_months,
             test_start_month=resolved_test_start_month,
@@ -205,6 +208,7 @@ def train_walk_forward_single_date_from_config_service(
             label_column=config.label_column,
             test_month=test_month,
             as_of_date=as_of_date,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
             train_window_months=config.train_window_months,
             validation_window_months=config.validation_window_months,
         )

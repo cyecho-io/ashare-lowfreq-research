@@ -11,6 +11,8 @@ from ashare_backtest.logging_utils import get_logger
 
 
 LOGGER = get_logger("research.trainer")
+NATIVE_BACKEND = "native"
+NATIVE_MODEL = "lgbm"
 
 
 DEFAULT_FEATURE_COLUMNS = [
@@ -192,6 +194,13 @@ def _score_frame(model, frame: pd.DataFrame, *, feature_columns: tuple[str, ...]
     return scored
 
 
+def _attach_native_output_metadata(scored: pd.DataFrame) -> pd.DataFrame:
+    enriched = scored.copy()
+    enriched["backend"] = NATIVE_BACKEND
+    enriched["model"] = NATIVE_MODEL
+    return enriched
+
+
 def train_lightgbm_model(config: ModelTrainConfig) -> dict[str, float | int | str]:
     import lightgbm as lgb
 
@@ -229,6 +238,7 @@ def train_lightgbm_model(config: ModelTrainConfig) -> dict[str, float | int | st
     scored = test_frame.loc[:, ["trade_date", "symbol", config.label_column]].copy()
     scored["prediction"] = predictions
     scored = scored.rename(columns={config.label_column: "label"})
+    scored = _attach_native_output_metadata(scored)
 
     scores_path = Path(config.output_scores_path)
     scores_path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +248,10 @@ def train_lightgbm_model(config: ModelTrainConfig) -> dict[str, float | int | st
     rmse = float((((scored["prediction"] - scored["label"]) ** 2).mean()) ** 0.5)
     ic = float(scored[["prediction", "label"]].corr(method="spearman").iloc[0, 1])
     metrics = {
+        "backend": NATIVE_BACKEND,
+        "model": NATIVE_MODEL,
         "label_column": config.label_column,
+        "feature_columns": list(config.feature_columns),
         "train_rows": int(len(train_frame)),
         "test_rows": int(len(test_frame)),
         "feature_count": int(len(config.feature_columns)),
@@ -319,13 +332,17 @@ def train_lightgbm_walk_forward_as_of_date(config: WalkForwardAsOfDateConfig) ->
     scored["train_end_date"] = train_frame["trade_date"].max().date().isoformat()
     scored["validation_end_date"] = validation_frame["trade_date"].max().date().isoformat()
     scored["as_of_date"] = as_of_date.date().isoformat()
+    scored = _attach_native_output_metadata(scored)
 
     scores_path = Path(config.output_scores_path)
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scored.to_parquet(scores_path, index=False)
 
     metrics = {
+        "backend": NATIVE_BACKEND,
+        "model": NATIVE_MODEL,
         "label_column": config.label_column,
+        "feature_columns": list(config.feature_columns),
         "feature_count": int(len(config.feature_columns)),
         "train_window_months": config.train_window_months,
         "validation_window_months": config.validation_window_months,
@@ -417,13 +434,17 @@ def train_lightgbm_walk_forward_single_date(config: WalkForwardSingleDateConfig)
     scored["train_end_month"] = str(train_months[-1])
     scored["validation_end_month"] = str(validation_months[-1])
     scored["test_month"] = str(test_month)
+    scored = _attach_native_output_metadata(scored)
 
     scores_path = Path(config.output_scores_path)
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scored.to_parquet(scores_path, index=False)
 
     metrics: dict[str, float | int | str] = {
+        "backend": NATIVE_BACKEND,
+        "model": NATIVE_MODEL,
         "label_column": config.label_column,
+        "feature_columns": list(config.feature_columns),
         "feature_count": int(len(config.feature_columns)),
         "train_window_months": config.train_window_months,
         "validation_window_months": config.validation_window_months,
@@ -596,6 +617,7 @@ def train_lightgbm_walk_forward(config: WalkForwardConfig) -> dict[str, float | 
         raise ValueError("walk-forward training produced no scored windows")
 
     all_scored = pd.concat(scored_parts, ignore_index=True).sort_values(["trade_date", "symbol"])
+    all_scored = _attach_native_output_metadata(all_scored)
     scores_path = Path(config.output_scores_path)
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     all_scored.to_parquet(scores_path, index=False)
@@ -615,7 +637,10 @@ def train_lightgbm_walk_forward(config: WalkForwardConfig) -> dict[str, float | 
         else 0.0
     )
     metrics = {
+        "backend": NATIVE_BACKEND,
+        "model": NATIVE_MODEL,
         "label_column": config.label_column,
+        "feature_columns": list(config.feature_columns),
         "feature_count": int(len(config.feature_columns)),
         "train_window_months": config.train_window_months,
         "validation_window_months": config.validation_window_months,

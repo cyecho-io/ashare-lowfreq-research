@@ -41,6 +41,7 @@ class SQLiteParquetImporter:
             source_type="sqlite",
             source_path=str(self.sqlite_path),
             datasets=datasets,
+            sqlite_summary=self._build_sqlite_summary(bars_frame, instruments_frame),
         )
         write_catalog(self.storage_root / "catalog.json", catalog)
         return datasets
@@ -281,3 +282,13 @@ class SQLiteParquetImporter:
             min_date=min_date,
             max_date=max_date,
         )
+
+    @staticmethod
+    def _build_sqlite_summary(bars_frame: pd.DataFrame, instruments_frame: pd.DataFrame) -> dict[str, int | str]:
+        trade_dates = pd.to_datetime(bars_frame.get("trade_date"), errors="coerce").dropna()
+        return {
+            "equity_symbol_count": int(bars_frame["symbol"].nunique()) if "symbol" in bars_frame.columns else 0,
+            "instrument_count": int(len(instruments_frame)),
+            "date_min": trade_dates.min().date().isoformat() if not trade_dates.empty else "",
+            "date_max": trade_dates.max().date().isoformat() if not trade_dates.empty else "",
+        }

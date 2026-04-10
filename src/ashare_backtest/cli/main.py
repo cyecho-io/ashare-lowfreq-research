@@ -19,8 +19,17 @@ from ashare_backtest.data import (
     resolve_tushare_token,
 )
 from ashare_backtest.factors import FactorBuildConfig, FactorBuilder, resolve_factor_snapshot_path
+from ashare_backtest.qlib_integration import (
+    QlibAsOfDateConfig,
+    QlibSingleDateConfig,
+    QlibWalkForwardConfig,
+    train_qlib_as_of_date,
+    train_qlib_single_date,
+    train_qlib_walk_forward,
+)
 from ashare_backtest.research import (
     CapacityAnalysisConfig,
+    DEFAULT_FEATURE_COLUMNS,
     LayeredAnalysisConfig,
     ModelTrainConfig,
     MonthlyComparisonConfig,
@@ -179,6 +188,22 @@ def build_parser() -> argparse.ArgumentParser:
     wf_parser.add_argument("--output-scores-path", default="research/models/walk_forward_scores.parquet")
     wf_parser.add_argument("--output-metrics-path", default="research/models/walk_forward_metrics.json")
 
+    qlib_wf_parser = subparsers.add_parser(
+        "qlib-train-walk-forward",
+        help="Train a walk-forward score model using Qlib data expressions",
+    )
+    qlib_wf_parser.add_argument("--provider-uri", default="~/.qlib/qlib_data/cn_data")
+    qlib_wf_parser.add_argument("--region", default="cn")
+    qlib_wf_parser.add_argument("--market", default="csi300")
+    qlib_wf_parser.add_argument("--config-id", default="qlib_default")
+    qlib_wf_parser.add_argument("--model-name", default="lgbm")
+    qlib_wf_parser.add_argument("--train-window-months", type=int, default=12)
+    qlib_wf_parser.add_argument("--validation-window-months", type=int, default=1)
+    qlib_wf_parser.add_argument("--test-start-month", default="2025-07")
+    qlib_wf_parser.add_argument("--test-end-month", default="2026-02")
+    qlib_wf_parser.add_argument("--output-scores-path", default="research/models/walk_forward_scores_qlib.parquet")
+    qlib_wf_parser.add_argument("--output-metrics-path", default="research/models/walk_forward_metrics_qlib.json")
+
     wf_from_config_parser = subparsers.add_parser(
         "train-lgbm-walk-forward-from-config",
         help="Train monthly walk-forward scores using defaults loaded from a research TOML config",
@@ -214,6 +239,27 @@ def build_parser() -> argparse.ArgumentParser:
     wf_asof_parser.add_argument("--validation-window-months", type=int, default=1)
     wf_asof_parser.add_argument("--output-scores-path", default="research/models/walk_forward_scores_as_of_date.parquet")
     wf_asof_parser.add_argument("--output-metrics-path", default="research/models/walk_forward_metrics_as_of_date.json")
+
+    qlib_asof_parser = subparsers.add_parser(
+        "qlib-train-as-of-date",
+        help="Score a single date using a Qlib-backed training window",
+    )
+    qlib_asof_parser.add_argument("--provider-uri", default="~/.qlib/qlib_data/cn_data")
+    qlib_asof_parser.add_argument("--region", default="cn")
+    qlib_asof_parser.add_argument("--market", default="csi300")
+    qlib_asof_parser.add_argument("--config-id", default="qlib_default")
+    qlib_asof_parser.add_argument("--model-name", default="lgbm")
+    qlib_asof_parser.add_argument("--as-of-date", required=True)
+    qlib_asof_parser.add_argument("--train-window-months", type=int, default=12)
+    qlib_asof_parser.add_argument("--validation-window-months", type=int, default=1)
+    qlib_asof_parser.add_argument(
+        "--output-scores-path",
+        default="research/models/walk_forward_scores_qlib_as_of_date.parquet",
+    )
+    qlib_asof_parser.add_argument(
+        "--output-metrics-path",
+        default="research/models/walk_forward_metrics_qlib_as_of_date.json",
+    )
 
     wf_asof_from_config_parser = subparsers.add_parser(
         "train-lgbm-walk-forward-as-of-date-from-config",
@@ -261,6 +307,28 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional metrics json override; defaults to <metric_output_path> with _<as-of-date> suffix",
     )
+
+    qlib_single_parser = subparsers.add_parser(
+        "qlib-train-single-date",
+        help="Score a single date using the model window implied by a specific Qlib test month",
+    )
+    qlib_single_parser.add_argument("--provider-uri", default="~/.qlib/qlib_data/cn_data")
+    qlib_single_parser.add_argument("--region", default="cn")
+    qlib_single_parser.add_argument("--market", default="csi300")
+    qlib_single_parser.add_argument("--config-id", default="qlib_default")
+    qlib_single_parser.add_argument("--model-name", default="lgbm")
+    qlib_single_parser.add_argument("--test-month", required=True)
+    qlib_single_parser.add_argument("--as-of-date", required=True)
+    qlib_single_parser.add_argument(
+        "--output-scores-path",
+        default="research/models/walk_forward_scores_qlib_single_date.parquet",
+    )
+    qlib_single_parser.add_argument(
+        "--output-metrics-path",
+        default="research/models/walk_forward_metrics_qlib_single_date.json",
+    )
+    qlib_single_parser.add_argument("--train-window-months", type=int, default=12)
+    qlib_single_parser.add_argument("--validation-window-months", type=int, default=1)
 
     latest_parser = subparsers.add_parser(
         "train-lgbm-latest-inference",
@@ -718,6 +786,30 @@ def main() -> None:
             )
             return
 
+        if args.command == "qlib-train-walk-forward":
+            metrics = train_qlib_walk_forward(
+                QlibWalkForwardConfig(
+                    provider_uri=args.provider_uri,
+                    region=args.region,
+                    market=args.market,
+                    config_id=args.config_id,
+                    model_name=args.model_name,
+                    train_window_months=args.train_window_months,
+                    validation_window_months=args.validation_window_months,
+                    test_start_month=args.test_start_month,
+                    test_end_month=args.test_end_month,
+                    output_scores_path=args.output_scores_path,
+                    output_metrics_path=args.output_metrics_path,
+                )
+            )
+            print(
+                "QLIB_WALK_FORWARD "
+                f"windows={metrics['window_count']} "
+                f"mean_spearman_ic={metrics['mean_spearman_ic']} "
+                f"scores={args.output_scores_path}"
+            )
+            return
+
         if args.command == "train-lgbm-walk-forward-from-config":
             config_path = resolve_research_config_path(args.config_path, args.factor_spec_id)
             metrics = train_walk_forward_from_config(
@@ -757,6 +849,30 @@ def main() -> None:
             )
             print(
                 "WALK_FORWARD_AS_OF_DATE "
+                f"as_of_date={metrics['as_of_date']} "
+                f"train_rows={metrics['train_rows']} "
+                f"scored_rows={metrics['scored_rows']} "
+                f"scores={args.output_scores_path}"
+            )
+            return
+
+        if args.command == "qlib-train-as-of-date":
+            metrics = train_qlib_as_of_date(
+                QlibAsOfDateConfig(
+                    provider_uri=args.provider_uri,
+                    region=args.region,
+                    market=args.market,
+                    config_id=args.config_id,
+                    model_name=args.model_name,
+                    as_of_date=args.as_of_date,
+                    train_window_months=args.train_window_months,
+                    validation_window_months=args.validation_window_months,
+                    output_scores_path=args.output_scores_path,
+                    output_metrics_path=args.output_metrics_path,
+                )
+            )
+            print(
+                "QLIB_AS_OF_DATE "
                 f"as_of_date={metrics['as_of_date']} "
                 f"train_rows={metrics['train_rows']} "
                 f"scored_rows={metrics['scored_rows']} "
@@ -807,6 +923,32 @@ def main() -> None:
                 f"train_rows={metrics['train_rows']} "
                 f"scored_rows={metrics['scored_rows']} "
                 f"scores={resolved_scores_path}"
+            )
+            return
+
+        if args.command == "qlib-train-single-date":
+            metrics = train_qlib_single_date(
+                QlibSingleDateConfig(
+                    provider_uri=args.provider_uri,
+                    region=args.region,
+                    market=args.market,
+                    config_id=args.config_id,
+                    model_name=args.model_name,
+                    test_month=args.test_month,
+                    as_of_date=args.as_of_date,
+                    train_window_months=args.train_window_months,
+                    validation_window_months=args.validation_window_months,
+                    output_scores_path=args.output_scores_path,
+                    output_metrics_path=args.output_metrics_path,
+                )
+            )
+            print(
+                "QLIB_SINGLE_DATE "
+                f"test_month={metrics['test_month']} "
+                f"as_of_date={metrics['as_of_date']} "
+                f"train_rows={metrics['train_rows']} "
+                f"scored_rows={metrics['scored_rows']} "
+                f"scores={args.output_scores_path}"
             )
             return
 
@@ -1244,6 +1386,7 @@ def train_walk_forward_from_config(
             output_scores_path=resolved_scores_path,
             output_metrics_path=resolved_metrics_path,
             label_column=config.label_column,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
             train_window_months=config.train_window_months,
             validation_window_months=config.validation_window_months,
             test_start_month=test_start_month,
@@ -1276,6 +1419,7 @@ def train_walk_forward_as_of_date_from_config(
             output_metrics_path=resolved_metrics_path,
             label_column=config.label_column,
             as_of_date=resolved_as_of_date,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
             train_window_months=config.train_window_months,
             validation_window_months=config.validation_window_months,
         )
@@ -1302,6 +1446,7 @@ def train_walk_forward_single_date_from_config(
             label_column=config.label_column,
             test_month=test_month,
             as_of_date=as_of_date,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
             train_window_months=config.train_window_months,
             validation_window_months=config.validation_window_months,
         )

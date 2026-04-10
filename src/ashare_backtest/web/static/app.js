@@ -128,10 +128,12 @@ function renderPresetMeta() {
     els.presetMeta.textContent = "未找到策略配置。";
     return;
   }
+  const selectedScore = activeScoreFile();
   const selectedPath = els.scoreFileSelect.value || "-";
   els.presetMeta.innerHTML = [
     `当前选择分数文件: <strong>${selectedPath}</strong>`,
-    `当前分数区间: <strong>${activeScoreFile()?.start_date || "-"}</strong> 至 <strong>${activeScoreFile()?.end_date || "-"}</strong>`,
+    `当前研究后端: <strong>${selectedScore?.backend || "-"}</strong> / 模型 <strong>${selectedScore?.model || "-"}</strong>`,
+    `当前分数区间: <strong>${selectedScore?.start_date || "-"}</strong> 至 <strong>${selectedScore?.end_date || "-"}</strong>`,
     `默认参数: top_k ${preset.top_k}, rebalance_every ${preset.rebalance_every}, min_hold_bars ${preset.min_hold_bars}`,
   ].join("<br />");
 }
@@ -142,7 +144,7 @@ function applyPresetDefaults() {
   const availableScoreFiles = scoreFileOptionsForPreset(preset);
   const selectedScore = availableScoreFiles[0] || null;
   els.scoreFileSelect.innerHTML = availableScoreFiles
-    .map((item) => `<option value="${item.path}">${item.path}</option>`)
+    .map((item) => `<option value="${item.path}">[${item.backend || "native"}] ${item.path}</option>`)
     .join("");
   if (selectedScore?.path) {
     els.scoreFileSelect.value = selectedScore.path;
@@ -169,11 +171,12 @@ function applyScoreFileDates() {
 
 function renderRuns() {
   els.runsList.innerHTML = "";
-  if (!state.runs.length) {
+  const visibleRuns = state.runs;
+  if (!visibleRuns.length) {
     els.runsList.innerHTML = `<div class="muted">还没有可展示的回测结果。</div>`;
     return;
   }
-  for (const run of state.runs) {
+  for (const run of visibleRuns) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = `run-card${state.activeRun?.id === run.id ? " active" : ""}`;
@@ -184,7 +187,7 @@ function renderRuns() {
         <span>Sharpe ${formatNumber(run.summary.sharpe_ratio, 2)}</span>
       </div>
       <div class="run-meta">
-        <span>交易 ${run.summary.trade_count}</span>
+        <span>${run.backend || "-"}/${run.model || "-"}</span>
         <span>${run.updated_at}</span>
       </div>
     `;
@@ -205,6 +208,8 @@ function renderSummary(run) {
   const initialCash = run.strategy_state?.strategy_config?.initial_cash;
   const items = [
     ["分数文件", run.scores_path || "-"],
+    ["研究后端", run.backend || "-"],
+    ["模型", run.model || "-"],
     ["回测区间", backtestRange],
     ["分数区间", scoreRange],
     ["初始资金", initialCash == null ? "-" : formatNumber(initialCash, 2)],
@@ -293,7 +298,7 @@ function renderTrades() {
 }
 
 async function loadStrategies() {
-  const payload = await fetchJson("/api/strategies");
+  const payload = await fetchJson(window.AshareWorkspace.withWorkspaceUrl("/api/strategies"));
   state.strategies = payload.strategies;
   state.scoreFiles = payload.score_files || [];
   els.strategySelect.innerHTML = state.strategies
@@ -303,7 +308,7 @@ async function loadStrategies() {
 }
 
 async function loadRuns(selectFirst = true) {
-  const payload = await fetchJson("/api/runs");
+  const payload = await fetchJson(window.AshareWorkspace.withWorkspaceUrl("/api/runs"));
   state.runs = payload.runs;
   renderRuns();
   if (selectFirst && state.runs.length) {
@@ -312,7 +317,7 @@ async function loadRuns(selectFirst = true) {
 }
 
 async function loadRun(runId) {
-  const payload = await fetchJson(`/api/runs/${encodeURIComponent(runId)}`);
+  const payload = await fetchJson(window.AshareWorkspace.withWorkspaceUrl(`/api/runs/${encodeURIComponent(runId)}`));
   state.activeRun = payload;
   state.activeTrades = payload.trades;
   renderRuns();
@@ -338,7 +343,7 @@ async function submitRun(event) {
     const payload = await fetchJson("/api/backtests", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(window.AshareWorkspace.withWorkspaceBody(body)),
     });
     state.currentJobId = payload.job.id;
     pollJob();
@@ -351,7 +356,7 @@ async function submitRun(event) {
 async function pollJob() {
   if (!state.currentJobId) return;
   try {
-    const payload = await fetchJson(`/api/jobs/${encodeURIComponent(state.currentJobId)}`);
+    const payload = await fetchJson(window.AshareWorkspace.withWorkspaceUrl(`/api/jobs/${encodeURIComponent(state.currentJobId)}`));
     const { job, run } = payload;
     logUi("轮询普通回测任务状态", job);
     if (job.status === "queued") {
@@ -393,9 +398,18 @@ function bindEvents() {
   els.scoreFileSelect.addEventListener("change", applyScoreFileDates);
   els.runForm.addEventListener("submit", submitRun);
   els.tradeFilter.addEventListener("input", renderTrades);
+  window.addEventListener("workspacechange", async () => {
+    state.currentJobId = null;
+    state.activeRun = null;
+    state.activeTrades = [];
+    await loadStrategies();
+    applyQueryPrefill();
+    await loadRuns(true);
+  });
 }
 
 async function init() {
+  window.AshareWorkspace.initWorkspaceControls();
   bindEvents();
   await loadStrategies();
   applyQueryPrefill();

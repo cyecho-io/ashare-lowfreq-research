@@ -22,6 +22,7 @@ class StorageCatalog:
     source_path: str
     imported_at: str
     datasets: list[DatasetSummary]
+    sqlite_summary: dict[str, int | str] | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -37,6 +38,7 @@ def build_catalog(
     source_type: str,
     source_path: str,
     datasets: list[DatasetSummary],
+    sqlite_summary: dict[str, int | str] | None = None,
     schema_version: str = "v1",
 ) -> StorageCatalog:
     return StorageCatalog(
@@ -45,4 +47,5 @@ def build_catalog(
         source_path=source_path,
         imported_at=datetime.now().isoformat(timespec="seconds"),
         datasets=datasets,
+        sqlite_summary=sqlite_summary,
     )

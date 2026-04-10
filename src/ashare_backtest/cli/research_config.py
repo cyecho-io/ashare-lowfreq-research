@@ -18,6 +18,7 @@ class ResearchRunConfig:
     factor_as_of_date: str
     factor_end_date: str
     label_column: str
+    feature_columns: tuple[str, ...]
     train_window_months: int
     validation_window_months: int
     test_start_month: str
@@ -122,6 +123,13 @@ def load_research_config(path: str | Path) -> ResearchRunConfig:
             start_date=factor_start_date,
         )
     )
+    raw_feature_columns = training.get("feature_columns", ())
+    if raw_feature_columns is None:
+        feature_columns: tuple[str, ...] = ()
+    elif isinstance(raw_feature_columns, (list, tuple)):
+        feature_columns = tuple(str(item).strip() for item in raw_feature_columns if str(item).strip())
+    else:
+        raise ValueError("training.feature_columns must be an array of strings when provided")
     return ResearchRunConfig(
         storage_root=str(storage.get("root", "storage")),
         factor_spec_id=factor_spec_id,
@@ -132,6 +140,7 @@ def load_research_config(path: str | Path) -> ResearchRunConfig:
         factor_as_of_date=factor_as_of_date,
         factor_end_date=factor_as_of_date,
         label_column=str(training.get("label_column", "excess_fwd_return_5")),
+        feature_columns=feature_columns,
         train_window_months=int(training.get("train_window_months", 12)),
         validation_window_months=int(training.get("validation_window_months", 1)),
         test_start_month=str(training["test_start_month"]),

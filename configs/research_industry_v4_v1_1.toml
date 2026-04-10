@@ -23,6 +23,13 @@ metric_output_path = "research/models/walk_forward_metrics_industry_v4_v1_1.json
 [analysis]
 layer_output_path = "research/models/walk_forward_layer_analysis_industry_v4_v1_1.json"
 
+[qlib]
+provider_uri = "~/.qlib/qlib_data/cn_data"
+region = "cn"
+market = "csi300"
+model_name = "lgbm"
+config_id = "research_industry_v4_v1_1_qlib"
+
 [model_backtest]
 output_dir = "results/model_score_backtest_walk_forward_industry_v4_v1_1"
 start_date = "2024-01-03"

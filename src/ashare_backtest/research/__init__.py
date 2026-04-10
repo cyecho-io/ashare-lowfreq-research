@@ -17,6 +17,7 @@ from .analysis import (
 from .score_strategy import ScoreStrategyConfig, ScoreTopKStrategy
 from .sweep import SweepConfig, run_model_sweep
 from .trainer import (
+    DEFAULT_FEATURE_COLUMNS,
     LatestInferenceConfig,
     ModelTrainConfig,
     WalkForwardAsOfDateConfig,
@@ -32,6 +33,7 @@ from .trainer import (
 __all__ = [
     "LayeredAnalysisConfig",
     "CapacityAnalysisConfig",
+    "DEFAULT_FEATURE_COLUMNS",
     "LatestInferenceConfig",
     "ModelTrainConfig",
     "WalkForwardAsOfDateConfig",

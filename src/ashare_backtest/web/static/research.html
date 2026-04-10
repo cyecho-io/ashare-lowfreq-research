@@ -13,6 +13,13 @@
         <a class="topnav-link" href="/backtest">回测控制台</a>
         <a class="topnav-link active" href="/research">模型研究台</a>
         <a class="topnav-link" href="/simulation">模拟成交台</a>
+        <label class="workspace-switch">
+          <span>工作区</span>
+          <select data-workspace-switch>
+            <option value="native">native</option>
+            <option value="qlib">qlib</option>
+          </select>
+        </label>
       </nav>
 
       <header class="hero">
@@ -22,7 +29,7 @@
           <p class="subcopy">直接编辑 `configs/*.toml` 内容并运行完整研究流水线，页面会展示执行日志、产物路径和关键指标。</p>
         </div>
         <div class="hero-meta">
-          <span class="pill">TOML 驱动</span>
+          <span class="pill">Workspace: <strong data-workspace-label>native</strong></span>
           <span class="pill">完整研究流水线</span>
           <span class="pill">执行日志可见</span>
         </div>
@@ -136,6 +143,7 @@
       </main>
     </div>
 
+    <script src="/static/workspace.js"></script>
     <script src="/static/research.js"></script>
   </body>
 </html>

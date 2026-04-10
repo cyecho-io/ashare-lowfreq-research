@@ -56,16 +56,18 @@ function renderLogOutput(content) {
 }
 
 function renderActiveConfigMeta(configPath) {
-  researchEls.configFilename.textContent = configPath || "configs/*.toml";
+  const workspace = window.AshareWorkspace.getWorkspace();
+  researchEls.configFilename.textContent = `${configPath || "configs/*.toml"} · ${workspace}`;
 }
 
 function renderResearchRuns() {
   researchEls.runsList.innerHTML = "";
-  if (!researchState.runs.length) {
+  const visibleRuns = researchState.runs;
+  if (!visibleRuns.length) {
     researchEls.runsList.innerHTML = `<div class="muted">还没有研究记录。</div>`;
     return;
   }
-  for (const run of researchState.runs) {
+  for (const run of visibleRuns) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = `run-card${researchState.activeRun?.id === run.id ? " active" : ""}`;
@@ -73,7 +75,7 @@ function renderResearchRuns() {
       <h3>${run.name}</h3>
       <div class="run-meta">
         <span>${run.updated_at}</span>
-        <span>${run.config_path || "-"}</span>
+        <span>${run.backend || "-"} / ${run.model || "-"}</span>
       </div>
       <div class="run-meta">
         <span>IC ${formatResearchNumber(run.metrics?.mean_spearman_ic, 4)}</span>
@@ -91,6 +93,9 @@ function renderResearchSummary(run) {
   const metrics = run.metrics || {};
   const layerSummary = run.layer_summary || {};
   const items = [
+    ["研究后端", run.backend || "-"],
+    ["模型", run.model || "-"],
+    ["配置标识", run.config_id || "-"],
     ["窗口数", metrics.window_count ?? "-"],
     ["评估 IC", formatResearchNumber(metrics.mean_spearman_ic, 4)],
     ["验证 IC", formatResearchNumber(metrics.mean_validation_spearman_ic, 4)],
@@ -108,6 +113,9 @@ function renderResearchSummary(run) {
     ["原始配置", run.config_path || "-"],
     ["本次配置快照", run.config_snapshot_path || "-"],
     ["执行日志", run.logs_path || "-"],
+    ["backend", run.backend || "-"],
+    ["model", run.model || "-"],
+    ["config_id", run.config_id || "-"],
     ["factor", run.factor_panel_path || "-"],
     ["scores", run.scores_path || "-"],
     ["metrics", run.metrics_path || "-"],
@@ -120,13 +128,14 @@ function renderResearchSummary(run) {
   const backtestUrl = new URL("/backtest", window.location.origin);
   if (run.config_path) backtestUrl.searchParams.set("config_path", run.config_path);
   if (run.scores_path) backtestUrl.searchParams.set("scores_path", run.scores_path);
+  backtestUrl.searchParams.set("workspace", window.AshareWorkspace.getWorkspace());
   researchEls.openBacktest.href = backtestUrl.toString();
 
   renderResearchRuns();
 }
 
 async function loadResearchConfigs() {
-  const payload = await fetchResearchJson("/api/research/configs");
+  const payload = await fetchResearchJson(window.AshareWorkspace.withWorkspaceUrl("/api/research/configs"));
   researchState.configs = payload.configs || [];
   researchEls.configSelect.innerHTML = researchState.configs
     .map((item) => `<option value="${item.config_path}">${item.name}</option>`)
@@ -137,7 +146,7 @@ async function loadResearchConfigs() {
 }
 
 async function loadResearchConfigText(configId) {
-  const payload = await fetchResearchJson(`/api/research/configs/${encodeURIComponent(configId)}`);
+  const payload = await fetchResearchJson(window.AshareWorkspace.withWorkspaceUrl(`/api/research/configs/${encodeURIComponent(configId)}`));
   researchEls.configSelect.value = payload.config_path;
   researchState.originalConfigText = payload.content || "";
   researchEls.configEditor.value = researchState.originalConfigText;
@@ -145,7 +154,7 @@ async function loadResearchConfigText(configId) {
 }
 
 async function loadResearchRuns(selectFirst = true) {
-  const payload = await fetchResearchJson("/api/research/runs");
+  const payload = await fetchResearchJson(window.AshareWorkspace.withWorkspaceUrl("/api/research/runs"));
   researchState.runs = payload.runs || [];
   renderResearchRuns();
   if (selectFirst && researchState.runs.length) {
@@ -154,7 +163,7 @@ async function loadResearchRuns(selectFirst = true) {
 }
 
 async function loadResearchRun(runId) {
-  const payload = await fetchResearchJson(`/api/research/runs/${encodeURIComponent(runId)}`);
+  const payload = await fetchResearchJson(window.AshareWorkspace.withWorkspaceUrl(`/api/research/runs/${encodeURIComponent(runId)}`));
   renderResearchSummary(payload);
 }
 
@@ -169,10 +178,11 @@ async function submitResearchJob(event) {
     const payload = await fetchResearchJson("/api/research/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(window.AshareWorkspace.withWorkspaceBody({
         config_path: researchEls.configSelect.value,
         config_text: researchEls.configEditor.value,
-      }),
+        backend: window.AshareWorkspace.getWorkspace(),
+      })),
     });
     researchState.currentJobId = payload.job.id;
     pollResearchJob();
@@ -186,7 +196,9 @@ async function submitResearchJob(event) {
 async function pollResearchJob() {
   if (!researchState.currentJobId) return;
   try {
-    const payload = await fetchResearchJson(`/api/research/jobs/${encodeURIComponent(researchState.currentJobId)}`);
+    const payload = await fetchResearchJson(
+      window.AshareWorkspace.withWorkspaceUrl(`/api/research/jobs/${encodeURIComponent(researchState.currentJobId)}`),
+    );
     const { job, run } = payload;
     renderLogOutput(job.logs);
     if (job.status === "queued") {
@@ -196,8 +208,8 @@ async function pollResearchJob() {
       return;
     }
     if (job.status === "running") {
-      researchEls.jobStatus.textContent = "正在执行 run-research-config 流水线。";
-      researchEls.logStatus.textContent = "正在执行研究流水线...";
+      researchEls.jobStatus.textContent = `正在执行 ${job.backend || "native"} 研究流水线。`;
+      researchEls.logStatus.textContent = `正在执行 ${job.backend || "native"} 研究流水线...`;
       window.setTimeout(pollResearchJob, 1500);
       return;
     }
@@ -255,9 +267,16 @@ function bindResearchEvents() {
     }
   });
   researchEls.configToggle.addEventListener("click", toggleConfigPanel);
+  window.addEventListener("workspacechange", async () => {
+    researchState.currentJobId = null;
+    researchState.activeRun = null;
+    await loadResearchConfigs();
+    await loadResearchRuns(true);
+  });
 }
 
 async function initResearch() {
+  window.AshareWorkspace.initWorkspaceControls();
   bindResearchEvents();
   await loadResearchConfigs();
   await loadResearchRuns(true);

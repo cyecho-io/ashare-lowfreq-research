@@ -80,6 +80,7 @@ function renderDetails(payload) {
 }
 
 async function init() {
+  window.AshareWorkspace.initWorkspaceControls();
   try {
     const payload = await fetchJson("/api/dashboard/summary");
     els.meta.textContent = `当前读取源库 ${payload.sqlite.path || "-"}，最近导入时间 ${payload.catalog.imported_at || "-"}`;
