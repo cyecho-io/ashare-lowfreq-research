@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ashare_backtest.data import load_universe_symbols
+from ashare_backtest.data import filter_universe_frame, load_universe_symbols
 from ashare_backtest.logging_utils import get_logger
 
 
@@ -53,25 +53,38 @@ class FactorBuilder:
         )
         symbols = self.config.symbols
         as_of_date = self.config.as_of_date
+        frame = pd.read_parquet(self.bars_path, columns=self.BARS_COLUMNS)
+        if self.config.start_date:
+            # Keep pre-start history so long-window features are available on the first in-sample dates.
+            feature_history_start = pd.Timestamp(self.config.start_date) - pd.Timedelta(days=180)
+            frame = frame.loc[frame["trade_date"] >= feature_history_start]
+        if as_of_date:
+            frame = frame.loc[frame["trade_date"] <= pd.Timestamp(as_of_date)]
         if self.config.universe_name:
             symbols = load_universe_symbols(
                 storage_root=self.storage_root,
                 universe_name=self.config.universe_name,
                 as_of_date=as_of_date,
             )
-        frame = pd.read_parquet(self.bars_path, columns=self.BARS_COLUMNS)
         if symbols:
             frame = frame.loc[frame["symbol"].isin(symbols)]
-        if self.config.start_date:
-            frame = frame.loc[frame["trade_date"] >= pd.Timestamp(self.config.start_date)]
-        if as_of_date:
-            frame = frame.loc[frame["trade_date"] <= pd.Timestamp(as_of_date)]
         frame = frame.sort_values(["symbol", "trade_date"]).copy()
 
         instruments = pd.read_parquet(self.instruments_path, columns=self.INSTRUMENT_COLUMNS)
         frame = frame.merge(instruments, on="symbol", how="left")
 
         panel = self._build_factor_panel(frame)
+        if self.config.universe_name:
+            panel = filter_universe_frame(
+                panel,
+                storage_root=self.storage_root,
+                universe_name=self.config.universe_name,
+            )
+        if self.config.start_date:
+            panel = panel.loc[panel["trade_date"] >= pd.Timestamp(self.config.start_date)].copy()
+        if as_of_date:
+            panel = panel.loc[panel["trade_date"] <= pd.Timestamp(as_of_date)].copy()
+        panel = panel.drop(columns=["is_suspended"], errors="ignore")
         output_path = Path(self.config.output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         panel.to_parquet(output_path, index=False)
@@ -155,6 +168,7 @@ class FactorBuilder:
             "close",
             "volume",
             "amount",
+            "is_suspended",
             "mom_5",
             "mom_10",
             "mom_20",

@@ -16,11 +16,15 @@ from ashare_backtest.research.score_workflow import (
     load_score_symbols,
 )
 from ashare_backtest.research.trainer import (
+    DEFAULT_FEATURE_COLUMNS,
     WalkForwardAsOfDateConfig,
+    WalkForwardConfig,
     WalkForwardSingleDateConfig,
+    train_lightgbm_walk_forward,
     train_lightgbm_walk_forward_as_of_date,
     train_lightgbm_walk_forward_single_date,
 )
+from ashare_backtest.cli.commands.research import resolve_month_range_output_path
 from ashare_backtest.cli.research_config import load_research_config, resolve_dated_output_path
 from ashare_backtest.factors import resolve_factor_snapshot_path
 
@@ -140,7 +144,46 @@ def train_walk_forward_as_of_date_from_config_service(
             output_metrics_path=resolved_metrics_path,
             label_column=config.label_column,
             as_of_date=resolved_as_of_date,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
             train_window_months=config.train_window_months,
+            validation_window_months=config.validation_window_months,
+        )
+    )
+
+
+def train_walk_forward_history_from_config_service(
+    config_path: str,
+    factor_panel_path: str = "",
+    test_start_month: str = "",
+    test_end_month: str = "",
+    output_scores_path: str = "",
+    output_metrics_path: str = "",
+) -> dict[str, float | int | str]:
+    config = load_research_config(config_path)
+    resolved_test_start_month = test_start_month or config.test_start_month
+    resolved_test_end_month = test_end_month or config.test_end_month
+    resolved_factor_panel_path = factor_panel_path or config.factor_snapshot_path
+    resolved_scores_path = output_scores_path or resolve_month_range_output_path(
+        config.score_output_path,
+        resolved_test_start_month,
+        resolved_test_end_month,
+    )
+    resolved_metrics_path = output_metrics_path or resolve_month_range_output_path(
+        config.metric_output_path,
+        resolved_test_start_month,
+        resolved_test_end_month,
+    )
+    return train_lightgbm_walk_forward(
+        WalkForwardConfig(
+            factor_panel_path=resolved_factor_panel_path,
+            output_scores_path=resolved_scores_path,
+            output_metrics_path=resolved_metrics_path,
+            label_column=config.label_column,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
+            train_window_months=config.train_window_months,
+            validation_window_months=config.validation_window_months,
+            test_start_month=resolved_test_start_month,
+            test_end_month=resolved_test_end_month,
         )
     )
 
@@ -165,7 +208,9 @@ def train_walk_forward_single_date_from_config_service(
             label_column=config.label_column,
             test_month=test_month,
             as_of_date=as_of_date,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
             train_window_months=config.train_window_months,
+            validation_window_months=config.validation_window_months,
         )
     )
 

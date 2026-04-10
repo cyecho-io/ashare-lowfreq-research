@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import logging
 import os
@@ -8,6 +9,8 @@ import re
 import sqlite3
 import threading
 import tempfile
+import tomllib
+from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -25,23 +28,39 @@ from ashare_backtest.research.services import (
     ModelBacktestServiceConfig,
     generate_strategy_state_from_config_service,
     run_model_backtest_service,
+    train_walk_forward_as_of_date_from_config_service,
+    train_walk_forward_history_from_config_service,
     train_walk_forward_single_date_from_config_service,
 )
-from ashare_backtest.cli.research_config import ResearchRunConfig, load_research_config, resolve_dated_output_path
+from ashare_backtest.cli.commands.research import resolve_month_range_output_path, run_research_pipeline
+from ashare_backtest.cli.research_config import (
+    ResearchRunConfig,
+    load_research_config,
+    resolve_dated_output_path,
+    resolve_research_run_output_paths,
+)
 from ashare_backtest.factors import FactorBuildConfig, FactorBuilder, resolve_factor_snapshot_path
 from ashare_backtest.logging_utils import configure_file_logging, get_logger
-from ashare_backtest.research import StrategyStateConfig, generate_strategy_state
+from ashare_backtest.qlib_integration import (
+    QlibWalkForwardConfig,
+    parse_qlib_feature_specs,
+    train_qlib_walk_forward,
+)
+from ashare_backtest.research import LayeredAnalysisConfig, StrategyStateConfig, analyze_score_layers, generate_strategy_state
 from ashare_backtest.research.trainer import WalkForwardAsOfDateConfig, train_lightgbm_walk_forward_as_of_date
 
 # Backward-compatible aliases kept for local tests and patch points.
 generate_strategy_state_from_config = generate_strategy_state_from_config_service
 run_model_backtest = run_model_backtest_service
+train_walk_forward_as_of_date_from_config = train_walk_forward_as_of_date_from_config_service
+train_walk_forward_history_from_config = train_walk_forward_history_from_config_service
 train_walk_forward_single_date_from_config = train_walk_forward_single_date_from_config_service
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 RESULTS_ROOT = REPO_ROOT / "results"
 WEB_RUNS_ROOT = RESULTS_ROOT / "web_runs"
+RESEARCH_RUNS_ROOT = RESULTS_ROOT / "research_runs"
 PAPER_RUNS_ROOT = RESULTS_ROOT / "paper_runs"
 SIMULATION_ACCOUNTS_ROOT = RESULTS_ROOT / "simulation_accounts"
 SIMULATION_RUNS_ROOT = SIMULATION_ACCOUNTS_ROOT
@@ -76,6 +95,25 @@ class StrategyPreset:
     rebalance_every: int
     min_hold_bars: int
     keep_buffer: int
+
+
+@dataclass(frozen=True)
+class WorkspacePaths:
+    workspace: str
+    config_root: Path
+    results_root: Path
+    web_runs_root: Path
+    research_runs_root: Path
+    paper_runs_root: Path
+    simulation_accounts_root: Path
+    simulation_runs_root: Path
+    simulation_plans_root: Path
+    simulation_latest_root: Path
+    research_models_root: Path
+    score_manifest_path: Path
+
+
+SUPPORTED_WORKSPACES = {"native", "qlib"}
 
 
 def _previous_open_trade_date(trade_date_text: str, storage_root: str = "storage") -> str:
@@ -155,6 +193,95 @@ class JobStore:
 def _slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "run"
+
+
+def normalize_workspace(workspace: str = "") -> str:
+    normalized = str(workspace).strip().lower() or "native"
+    if normalized not in SUPPORTED_WORKSPACES:
+        raise ValueError(f"unsupported workspace: {workspace}")
+    return normalized
+
+
+def _workspace_result_root(repo_root: Path, workspace: str) -> Path:
+    normalized_workspace = normalize_workspace(workspace)
+    return repo_root / "results" / normalized_workspace
+
+
+def workspace_paths(repo_root: Path = REPO_ROOT, workspace: str = "native") -> WorkspacePaths:
+    normalized_workspace = normalize_workspace(workspace)
+    workspace_results_root = _workspace_result_root(repo_root, normalized_workspace)
+    return WorkspacePaths(
+        workspace=normalized_workspace,
+        config_root=repo_root / "configs",
+        results_root=workspace_results_root,
+        web_runs_root=workspace_results_root / "web_runs",
+        research_runs_root=workspace_results_root / "research_runs",
+        paper_runs_root=workspace_results_root / "paper_runs",
+        simulation_accounts_root=workspace_results_root / "simulation_accounts",
+        simulation_runs_root=workspace_results_root / "simulation_accounts",
+        simulation_plans_root=workspace_results_root / "simulation_accounts",
+        simulation_latest_root=workspace_results_root / "simulation_latest",
+        research_models_root=repo_root / "research" / normalized_workspace / "models",
+        score_manifest_path=repo_root / "research" / normalized_workspace / "models" / "score_source_manifest.json",
+    )
+
+
+def legacy_workspace_paths(repo_root: Path = REPO_ROOT) -> WorkspacePaths:
+    return WorkspacePaths(
+        workspace="native",
+        config_root=repo_root / "configs",
+        results_root=repo_root / "results",
+        web_runs_root=repo_root / "results" / "web_runs",
+        research_runs_root=repo_root / "results" / "research_runs",
+        paper_runs_root=repo_root / "results" / "paper_runs",
+        simulation_accounts_root=repo_root / "results" / "simulation_accounts",
+        simulation_runs_root=repo_root / "results" / "simulation_runs",
+        simulation_plans_root=repo_root / "results" / "simulation_plans",
+        simulation_latest_root=repo_root / "results" / "simulation_latest",
+        research_models_root=repo_root / "research" / "models",
+        score_manifest_path=repo_root / "research" / "models" / "score_source_manifest.json",
+    )
+
+
+def resolve_workspace_paths(repo_root: Path = REPO_ROOT, workspace: str = "") -> WorkspacePaths:
+    return workspace_paths(repo_root=repo_root, workspace=workspace) if str(workspace).strip() else legacy_workspace_paths(repo_root)
+
+
+def _config_workspace(path: Path, config_root: Path) -> str:
+    try:
+        relative = path.relative_to(config_root)
+    except ValueError:
+        relative = path
+    parts = relative.parts
+    if parts and parts[0] in SUPPORTED_WORKSPACES:
+        return str(parts[0])
+    name = path.stem.lower()
+    return "qlib" if "qlib" in name else "native"
+
+
+def _config_matches_workspace(path: Path, workspace: str, config_root: Path) -> bool:
+    return _config_workspace(path, config_root) == normalize_workspace(workspace)
+
+
+def _iter_workspace_config_paths(config_root: Path, workspace: str) -> list[Path]:
+    if not config_root.exists():
+        return []
+    normalized_workspace = normalize_workspace(workspace)
+    paths = [path for path in sorted(config_root.rglob("*.toml")) if _config_matches_workspace(path, normalized_workspace, config_root)]
+    return paths
+
+
+def _artifact_workspace(*, explicit_workspace: str = "", backend: str = "", path_text: str = "") -> str:
+    normalized_explicit = str(explicit_workspace).strip().lower()
+    if normalized_explicit in SUPPORTED_WORKSPACES:
+        return normalized_explicit
+    normalized_backend = str(backend).strip().lower()
+    if normalized_backend == "qlib":
+        return "qlib"
+    normalized_path = str(path_text).replace("\\", "/").lower()
+    if "/results/qlib/" in normalized_path or "/research/qlib/" in normalized_path or "/configs/qlib/" in normalized_path:
+        return "qlib"
+    return "native"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -356,12 +483,13 @@ def _resolve_dashboard_sqlite_path(repo_root: Path = REPO_ROOT) -> Path:
     return fallback
 
 
-def _latest_strategy_dir(strategy_id: str) -> Path:
-    return REPO_ROOT / "research" / "models" / "latest" / strategy_id
+def _latest_strategy_dir(strategy_id: str, latest_root: Path | None = None) -> Path:
+    root = latest_root or (REPO_ROOT / "research" / "models" / "latest")
+    return root / strategy_id
 
 
-def _read_latest_manifest(strategy_id: str) -> dict[str, Any]:
-    manifest_path = _latest_strategy_dir(strategy_id) / "manifest.json"
+def _read_latest_manifest(strategy_id: str, latest_root: Path | None = None) -> dict[str, Any]:
+    manifest_path = _latest_strategy_dir(strategy_id, latest_root=latest_root) / "manifest.json"
     if not manifest_path.exists():
         return {}
     payload = _read_json(manifest_path)
@@ -369,8 +497,13 @@ def _read_latest_manifest(strategy_id: str) -> dict[str, Any]:
     return payload
 
 
-def _paper_score_candidates(strategy_id: str, fallback_scores_path: str) -> tuple[dict[str, Any], list[tuple[str, str]]]:
-    manifest = _read_latest_manifest(strategy_id)
+def _paper_score_candidates(
+    strategy_id: str,
+    fallback_scores_path: str,
+    *,
+    latest_root: Path | None = None,
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    manifest = _read_latest_manifest(strategy_id, latest_root=latest_root)
     candidates: list[tuple[str, str]] = []
     seen: set[str] = set()
     for kind, path_text in (
@@ -396,6 +529,59 @@ def _score_date_range(path: Path) -> tuple[str, str]:
     if trade_dates.empty:
         return "", ""
     return trade_dates.min().date().isoformat(), trade_dates.max().date().isoformat()
+
+
+def _score_provenance_from_artifacts(
+    scores_path: str = "",
+    metrics_path: str = "",
+    *,
+    path_resolver=None,
+) -> dict[str, str]:
+    backend = ""
+    model = ""
+    config_id = ""
+    resolve_path = path_resolver or _resolve_repo_path
+
+    normalized_metrics_path = str(metrics_path).strip()
+    if normalized_metrics_path:
+        resolved_metrics_path = resolve_path(normalized_metrics_path)
+        if resolved_metrics_path.exists():
+            try:
+                metrics = _read_json(resolved_metrics_path)
+            except Exception:
+                metrics = {}
+            backend = str(metrics.get("backend") or "").strip()
+            model = str(metrics.get("model") or "").strip()
+            config_id = str(metrics.get("config_id") or "").strip()
+
+    normalized_scores_path = str(scores_path).strip()
+    if normalized_scores_path:
+        resolved_scores_path = resolve_path(normalized_scores_path)
+        if resolved_scores_path.exists():
+            for column_name in ("backend", "model", "config_id"):
+                try:
+                    sample = pd.read_parquet(resolved_scores_path, columns=[column_name]).head(1)
+                except Exception:
+                    continue
+                if sample.empty:
+                    continue
+                value = str(sample.iloc[0][column_name] or "").strip()
+                if not value:
+                    continue
+                if column_name == "backend" and not backend:
+                    backend = value
+                elif column_name == "model" and not model:
+                    model = value
+                elif column_name == "config_id" and not config_id:
+                    config_id = value
+
+    if not backend:
+        backend = "native"
+    return {
+        "backend": backend,
+        "model": model,
+        "config_id": config_id,
+    }
 
 
 def _equity_curve_date_range(points: list[dict[str, Any]]) -> tuple[str, str]:
@@ -446,8 +632,8 @@ def load_score_source_manifest(manifest_path: Path | None = None) -> dict[str, d
     return manifest
 
 
-def _materialize_merged_paper_scores(strategy_id: str, candidate_paths: list[str]) -> str:
-    target = _latest_strategy_dir(strategy_id) / "paper_history_scores.parquet"
+def _materialize_merged_paper_scores(strategy_id: str, candidate_paths: list[str], *, latest_root: Path | None = None) -> str:
+    target = _latest_strategy_dir(strategy_id, latest_root=latest_root) / "paper_history_scores.parquet"
     source_paths = [_resolve_repo_path(path_text) for path_text in candidate_paths if _resolve_repo_path(path_text).exists()]
     if not source_paths:
         return candidate_paths[0]
@@ -463,15 +649,24 @@ def _materialize_merged_paper_scores(strategy_id: str, candidate_paths: list[str
     return _display_path(target)
 
 
-def _resolve_paper_scores_path(strategy_id: str, fallback_scores_path: str) -> tuple[str, dict[str, Any], str]:
-    manifest, candidates = _paper_score_candidates(strategy_id, fallback_scores_path)
+def _resolve_paper_scores_path(
+    strategy_id: str,
+    fallback_scores_path: str,
+    *,
+    latest_root: Path | None = None,
+) -> tuple[str, dict[str, Any], str]:
+    manifest, candidates = _paper_score_candidates(strategy_id, fallback_scores_path, latest_root=latest_root)
     if not candidates:
         return fallback_scores_path, manifest, "config_default"
     existing_candidates = [(kind, path) for kind, path in candidates if _resolve_repo_path(path).exists()]
     if len(existing_candidates) == 1:
         return existing_candidates[0][1], manifest, existing_candidates[0][0]
     if len(existing_candidates) >= 2:
-        merged_path = _materialize_merged_paper_scores(strategy_id, [path for _, path in existing_candidates])
+        merged_path = _materialize_merged_paper_scores(
+            strategy_id,
+            [path for _, path in existing_candidates],
+            latest_root=latest_root,
+        )
         return merged_path, manifest, "merged_history"
 
     preferred_candidate = next(
@@ -498,28 +693,120 @@ def _iter_result_dirs(results_root: Path) -> list[Path]:
     )
 
 
+def _iter_research_run_dirs(results_root: Path = RESEARCH_RUNS_ROOT) -> list[Path]:
+    if not results_root.exists():
+        return []
+    return sorted(
+        [path for path in results_root.iterdir() if path.is_dir() and (path / "meta.json").exists()],
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _research_run_id_from_scores_path(
+    scores_path: str,
+    *,
+    repo_root: Path = REPO_ROOT,
+    results_root: Path = RESEARCH_RUNS_ROOT,
+) -> str:
+    normalized = str(scores_path).strip()
+    if not normalized:
+        return ""
+    score_file = Path(normalized)
+    if not score_file.is_absolute():
+        score_file = (repo_root / score_file).resolve()
+    if not score_file.exists():
+        return ""
+    for run_dir in _iter_research_run_dirs(results_root):
+        try:
+            score_file.resolve().relative_to(run_dir.resolve())
+            return run_dir.name
+        except ValueError:
+            continue
+    return ""
+
+
+def _resolve_backtest_output_dir(
+    scores_path: str,
+    run_name: str,
+    *,
+    repo_root: Path = REPO_ROOT,
+    workspace: str = "",
+) -> tuple[str, str]:
+    paths = resolve_workspace_paths(repo_root=repo_root, workspace=workspace)
+    research_run_id = _research_run_id_from_scores_path(
+        scores_path,
+        repo_root=repo_root,
+        results_root=paths.research_runs_root,
+    )
+    if research_run_id:
+        output_dir = paths.research_runs_root / research_run_id / "backtests" / run_name
+    else:
+        output_dir = paths.web_runs_root / run_name
+    return output_dir.relative_to(repo_root).as_posix(), research_run_id
+
+
 def list_score_parquet_files(
     models_root: Path = REPO_ROOT / "research" / "models",
     *,
     include_single_day: bool = True,
     configured_paths: list[str] | None = None,
-) -> list[dict[str, str]]:
-    manifest = load_score_source_manifest()
+    research_runs_root: Path | None = None,
+    manifest_path: Path | None = None,
+    workspace: str = "all",
+) -> list[dict[str, Any]]:
+    repo_root = models_root.parents[1] if models_root.name == "models" and models_root.parent.name == "research" else REPO_ROOT
+    resolved_research_runs_root = research_runs_root or (repo_root / "results" / "research_runs")
+    normalized_workspace = str(workspace).strip().lower()
+
+    def _resolve_local_path(path_text: str) -> Path:
+        path = Path(path_text)
+        if path.is_absolute():
+            return path
+        return (repo_root / path).resolve()
+
+    def _display_local_path(path: Path) -> str:
+        try:
+            return path.resolve().relative_to(repo_root).as_posix()
+        except ValueError:
+            return path.resolve().as_posix()
+
+    manifest = load_score_source_manifest(manifest_path)
     files: list[dict[str, str]] = []
     candidate_paths: list[Path] = []
+    explicit_score_paths: set[str] = set()
     if models_root.exists():
         candidate_paths.extend(path for path in models_root.rglob("*.parquet"))
+    if resolved_research_runs_root.exists():
+        for run_dir in _iter_research_run_dirs(resolved_research_runs_root):
+            meta_path = run_dir / "meta.json"
+            if not meta_path.exists():
+                continue
+            try:
+                payload = json.loads(meta_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            normalized = str(payload.get("scores_path") or "").strip()
+            if not normalized:
+                continue
+            resolved = _resolve_local_path(normalized)
+            if resolved.exists() and resolved.is_file() and resolved.suffix == ".parquet":
+                candidate_paths.append(resolved)
+                explicit_score_paths.add(_display_local_path(resolved))
     for configured_path in configured_paths or []:
         normalized = str(configured_path).strip()
         if not normalized:
             continue
-        resolved = _resolve_repo_path(normalized)
+        resolved = _resolve_local_path(normalized)
         if resolved.exists() and resolved.is_file() and resolved.suffix == ".parquet":
             candidate_paths.append(resolved)
+            explicit_score_paths.add(_display_local_path(resolved))
     for path in candidate_paths:
-        if not path.is_file() or "scores" not in path.name:
+        if not path.is_file():
             continue
-        display_path = _display_path(path)
+        display_path = _display_local_path(path)
+        if "scores" not in path.name and display_path not in explicit_score_paths:
+            continue
         start_date, end_date = _score_date_range(path)
         item = {
             "path": display_path,
@@ -546,26 +833,62 @@ def list_score_parquet_files(
                     "supports_incremental_update": bool(metadata.get("supports_incremental_update", False)),
                 }
             )
+        item.update(_score_provenance_from_artifacts(display_path, path_resolver=_resolve_local_path))
+        if not item.get("config_id") and metadata:
+            item["config_id"] = str(metadata.get("factor_spec_id") or "")
         files.append(item)
-    deduped: dict[str, dict[str, str]] = {}
+    deduped: dict[str, dict[str, Any]] = {}
     for item in files:
         deduped[item["path"]] = item
-    return [deduped[path] for path in sorted(deduped)]
+    ordered = [deduped[path] for path in sorted(deduped)]
+    if normalized_workspace in SUPPORTED_WORKSPACES:
+        return [
+            item
+            for item in ordered
+            if _artifact_workspace(
+                explicit_workspace=str(item.get("workspace") or ""),
+                backend=str(item.get("backend") or ""),
+                path_text=str(item.get("path") or ""),
+            )
+            == normalized_workspace
+        ]
+    return ordered
 
 
-def _score_file_payload_for_presets(presets: list[StrategyPreset], *, include_single_day: bool = False) -> list[dict[str, str]]:
+def _score_file_payload_for_presets(
+    presets: list[StrategyPreset],
+    *,
+    include_single_day: bool = False,
+    models_root: Path = REPO_ROOT / "research" / "models",
+    research_runs_root: Path | None = None,
+    manifest_path: Path | None = None,
+    workspace: str = "native",
+) -> list[dict[str, str]]:
     configured_paths = [preset.score_output_path for preset in presets if str(preset.score_output_path).strip()]
-    return list_score_parquet_files(include_single_day=include_single_day, configured_paths=configured_paths)
+    return list_score_parquet_files(
+        models_root=models_root,
+        include_single_day=include_single_day,
+        configured_paths=configured_paths,
+        research_runs_root=research_runs_root,
+        manifest_path=manifest_path,
+        workspace=workspace,
+    )
 
 
-def _resolve_selected_scores_path(scores_path: str, strategy_id: str, fallback_scores_path: str) -> tuple[str, dict[str, Any], str]:
+def _resolve_selected_scores_path(
+    scores_path: str,
+    strategy_id: str,
+    fallback_scores_path: str,
+    *,
+    latest_root: Path | None = None,
+) -> tuple[str, dict[str, Any], str]:
     normalized = str(scores_path).strip()
     if normalized:
         absolute_scores = _resolve_repo_path(normalized)
         if not absolute_scores.exists():
             raise FileNotFoundError(f"score file not found: {normalized}")
         return _display_path(absolute_scores), {}, "user_selected"
-    return _resolve_paper_scores_path(strategy_id, fallback_scores_path)
+    return _resolve_paper_scores_path(strategy_id, fallback_scores_path, latest_root=latest_root)
 
 
 def build_paper_readiness(
@@ -573,6 +896,7 @@ def build_paper_readiness(
     trade_date: str,
     scores_path: str = "",
     repo_root: Path = REPO_ROOT,
+    latest_root: Path | None = None,
 ) -> dict[str, Any]:
     absolute_config = (repo_root / config_path).resolve()
     if not absolute_config.exists():
@@ -582,6 +906,7 @@ def build_paper_readiness(
         scores_path,
         absolute_config.stem,
         config.score_output_path,
+        latest_root=latest_root,
     )
     score_start_date, score_end_date = _score_date_range(_resolve_repo_path(resolved_scores_path))
     manifest = load_score_source_manifest().get(resolved_scores_path, {})
@@ -658,6 +983,7 @@ def fill_scores_to_signal_date(
     trade_date: str,
     scores_path: str = "",
     repo_root: Path = REPO_ROOT,
+    latest_root: Path | None = None,
 ) -> dict[str, Any]:
     absolute_config = (repo_root / config_path).resolve()
     if not absolute_config.exists():
@@ -667,6 +993,7 @@ def fill_scores_to_signal_date(
         scores_path,
         absolute_config.stem,
         config.score_output_path,
+        latest_root=latest_root,
     )
     if not manifest:
         manifest = load_score_source_manifest().get(resolved_scores_path, {})
@@ -713,6 +1040,9 @@ def fill_scores_to_signal_date(
                     label_column=str(manifest.get("label_column") or config.label_column).strip(),
                     as_of_date=missing_date,
                     train_window_months=int(manifest.get("train_window_months") or config.train_window_months),
+                    validation_window_months=int(
+                        manifest.get("validation_window_months") or config.validation_window_months
+                    ),
                 )
             )
             scored_parts.append(pd.read_parquet(temp_scores_path))
@@ -885,8 +1215,8 @@ def _resolve_paper_run_dir(run_id: str, results_root: Path) -> Path:
     return matches[0]
 
 
-def _simulation_latest_dir(strategy_id: str) -> Path:
-    return SIMULATION_LATEST_ROOT / Path(strategy_id).name
+def _simulation_latest_dir(strategy_id: str, results_root: Path = SIMULATION_LATEST_ROOT) -> Path:
+    return results_root / Path(strategy_id).name
 
 
 def _simulation_account_dir(account_id: str, results_root: Path = SIMULATION_ACCOUNTS_ROOT) -> Path:
@@ -999,8 +1329,8 @@ def _simulation_bars_ready(storage_root: str, trade_date: str) -> bool:
     return not frame.empty
 
 
-def _read_latest_simulation_manifest(strategy_id: str) -> dict[str, Any]:
-    manifest_path = _simulation_latest_dir(strategy_id) / "manifest.json"
+def _read_latest_simulation_manifest(strategy_id: str, results_root: Path = SIMULATION_LATEST_ROOT) -> dict[str, Any]:
+    manifest_path = _simulation_latest_dir(strategy_id, results_root=results_root) / "manifest.json"
     if not manifest_path.exists():
         return {}
     payload = _read_json(manifest_path)
@@ -1008,8 +1338,8 @@ def _read_latest_simulation_manifest(strategy_id: str) -> dict[str, Any]:
     return payload
 
 
-def _write_latest_simulation_manifest(strategy_id: str, payload: dict[str, Any]) -> None:
-    latest_dir = _simulation_latest_dir(strategy_id)
+def _write_latest_simulation_manifest(strategy_id: str, payload: dict[str, Any], results_root: Path = SIMULATION_LATEST_ROOT) -> None:
+    latest_dir = _simulation_latest_dir(strategy_id, results_root=results_root)
     latest_dir.mkdir(parents=True, exist_ok=True)
     (latest_dir / "manifest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1105,25 +1435,69 @@ def _build_cached_benchmark_curve(
     return label, curve
 
 
-def list_strategy_presets(config_root: Path = CONFIG_ROOT) -> list[StrategyPreset]:
+def list_strategy_presets(
+    config_root: Path = CONFIG_ROOT,
+    *,
+    workspace: str = "native",
+    latest_root: Path | None = None,
+) -> list[StrategyPreset]:
     presets: list[StrategyPreset] = []
-    for path in sorted(config_root.glob("*.toml")):
+    for path in _iter_workspace_config_paths(config_root, workspace):
         try:
             config = load_research_config(path)
         except Exception:
             continue
-        presets.append(_preset_from_config(path, config))
+        presets.append(_preset_from_config(path, config, latest_root=latest_root))
     return presets
+
+
+def list_research_strategy_presets(config_root: Path = CONFIG_ROOT, *, workspace: str = "native") -> list[dict[str, Any]]:
+    presets: list[dict[str, Any]] = []
+    for path in _iter_workspace_config_paths(config_root, workspace):
+        try:
+            config = load_research_config(path)
+        except Exception:
+            continue
+        presets.append(
+            {
+                "id": path.stem,
+                "name": path.stem.replace("_", " "),
+                "config_path": _display_path(path),
+                "workspace": _config_workspace(path, config_root),
+                "factor_spec_id": config.factor_spec_id,
+                "factor_panel_path": config.factor_snapshot_path,
+                "label_column": config.label_column,
+                "train_window_months": config.train_window_months,
+                "validation_window_months": config.validation_window_months,
+                "test_start_month": config.test_start_month,
+                "test_end_month": config.test_end_month,
+                "score_output_path": config.score_output_path,
+                "metric_output_path": config.metric_output_path,
+            }
+        )
+    return presets
+
+
+def load_research_config_text(config_path: str, repo_root: Path = REPO_ROOT) -> dict[str, str]:
+    absolute_path = (repo_root / config_path).resolve()
+    if not absolute_path.exists():
+        raise FileNotFoundError(f"config not found: {config_path}")
+    return {
+        "config_path": _display_path(absolute_path),
+        "name": absolute_path.stem.replace("_", " "),
+        "content": absolute_path.read_text(encoding="utf-8"),
+    }
 
 
 def build_dashboard_summary(
     *,
     repo_root: Path = REPO_ROOT,
     config_root: Path = CONFIG_ROOT,
+    workspace: str = "native",
 ) -> dict[str, Any]:
     catalog = _read_catalog(repo_root / "storage" / "catalog.json")
     sqlite_path = _resolve_dashboard_sqlite_path(repo_root=repo_root)
-    strategy_count = len(list_strategy_presets(config_root=config_root))
+    strategy_count = len(list_strategy_presets(config_root=config_root, workspace=workspace))
 
     calendar_path = repo_root / "storage" / "parquet" / "calendar" / "ashare_trading_calendar.parquet"
     calendar_cells: list[dict[str, Any]] = []
@@ -1151,26 +1525,28 @@ def build_dashboard_summary(
             for row in tail.itertuples(index=False)
         ]
 
-    equity_symbol_count = 0
-    equity_date_min = ""
-    equity_date_max = ""
-    instrument_count = 0
-    with sqlite3.connect(sqlite_path) as conn:
-        bars_row = conn.execute(
-            """
-            select
-                count(distinct symbol) as symbol_count,
-                min(trade_date) as min_trade_date,
-                max(trade_date) as max_trade_date
-            from equity_daily_bars
-            """
-        ).fetchone()
-        if bars_row is not None:
-            equity_symbol_count = int(bars_row[0] or 0)
-            equity_date_min = str(bars_row[1] or "")
-            equity_date_max = str(bars_row[2] or "")
-        instruments_row = conn.execute("select count(*) from equity_instruments").fetchone()
-        instrument_count = int((instruments_row or [0])[0] or 0)
+    sqlite_summary = catalog.get("sqlite_summary", {})
+    equity_symbol_count = int(sqlite_summary.get("equity_symbol_count") or 0)
+    equity_date_min = str(sqlite_summary.get("date_min") or "")
+    equity_date_max = str(sqlite_summary.get("date_max") or "")
+    instrument_count = int(sqlite_summary.get("instrument_count") or 0)
+    if not sqlite_summary:
+        with sqlite3.connect(sqlite_path) as conn:
+            bars_row = conn.execute(
+                """
+                select
+                    count(distinct symbol) as symbol_count,
+                    min(trade_date) as min_trade_date,
+                    max(trade_date) as max_trade_date
+                from equity_daily_bars
+                """
+            ).fetchone()
+            if bars_row is not None:
+                equity_symbol_count = int(bars_row[0] or 0)
+                equity_date_min = str(bars_row[1] or "")
+                equity_date_max = str(bars_row[2] or "")
+            instruments_row = conn.execute("select count(*) from equity_instruments").fetchone()
+            instrument_count = int((instruments_row or [0])[0] or 0)
 
     datasets = {str(item.get("name") or ""): item for item in catalog.get("datasets", []) if isinstance(item, dict)}
     return {
@@ -1200,14 +1576,18 @@ def build_dashboard_summary(
     }
 
 
-def _preset_from_config(path: Path, config: ResearchRunConfig) -> StrategyPreset:
+def _preset_from_config(path: Path, config: ResearchRunConfig, *, latest_root: Path | None = None) -> StrategyPreset:
     display_name = path.stem.replace("_", " ")
-    resolved_paper_scores_path, manifest, paper_source_kind = _resolve_paper_scores_path(path.stem, config.score_output_path)
+    resolved_paper_scores_path, manifest, paper_source_kind = _resolve_paper_scores_path(
+        path.stem,
+        config.score_output_path,
+        latest_root=latest_root,
+    )
     paper_score_start_date, paper_score_end_date = _score_date_range(_resolve_repo_path(resolved_paper_scores_path))
     return StrategyPreset(
         id=path.stem,
         name=display_name,
-        config_path=path.relative_to(REPO_ROOT).as_posix(),
+        config_path=_display_path(path),
         factor_spec_id=config.factor_spec_id,
         score_output_path=config.score_output_path,
         paper_score_output_path=resolved_paper_scores_path,
@@ -1227,7 +1607,7 @@ def _preset_from_config(path: Path, config: ResearchRunConfig) -> StrategyPreset
     )
 
 
-def list_run_summaries(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]]:
+def list_run_summaries(results_root: Path = RESULTS_ROOT, workspace: str = "native") -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     for entry in _iter_result_dirs(results_root):
         summary_path = entry / "summary.json"
@@ -1244,6 +1624,7 @@ def list_run_summaries(results_root: Path = RESULTS_ROOT) -> list[dict[str, Any]
                 "result_dir": _display_path(entry),
                 "updated_at": datetime.fromtimestamp(entry.stat().st_mtime).isoformat(timespec="seconds"),
                 "summary": summary,
+                "workspace": normalize_workspace(workspace),
             }
         )
     return runs
@@ -1279,6 +1660,16 @@ def load_run_detail(
     score_end_date = ""
     if scores_path:
         score_start_date, score_end_date = _score_date_range(_resolve_repo_path(scores_path))
+    meta = _read_optional_json(target / "meta.json")
+    provenance = _score_provenance_from_artifacts(
+        str(meta.get("source_scores_path") or scores_path or ""),
+        str(meta.get("metrics_path") or ""),
+    )
+    artifact_workspace = _artifact_workspace(
+        explicit_workspace=str(meta.get("workspace") or ""),
+        backend=str(meta.get("backend") or provenance["backend"] or ""),
+        path_text=_display_path(target),
+    )
     return {
         "id": safe_run_id,
         "name": safe_run_id,
@@ -1294,6 +1685,14 @@ def load_run_detail(
         "benchmark_curve": benchmark_curve,
         "strategy_state": strategy_state,
         "trades": trades,
+        "meta": meta,
+        "workspace": artifact_workspace,
+        "backend": str(meta.get("backend") or provenance["backend"] or ""),
+        "model": str(meta.get("model") or provenance["model"] or ""),
+        "config_id": str(meta.get("config_id") or provenance["config_id"] or ""),
+        "source_research_run_id": str(meta.get("source_research_run_id") or ""),
+        "source_scores_path": str(meta.get("source_scores_path") or scores_path),
+        "source_run_type": str(meta.get("source_run_type") or "web_run"),
     }
 
 
@@ -1301,8 +1700,82 @@ def _read_optional_json(path: Path) -> dict[str, Any]:
     return _read_json(path) if path.exists() else {}
 
 
-def list_paper_trade_summaries(results_root: Path = PAPER_RUNS_ROOT) -> list[dict[str, Any]]:
+def _build_research_run_payload(run_id: str, target: Path, meta: dict[str, Any]) -> dict[str, Any]:
+    scores_path = str(meta.get("scores_path") or "").strip()
+    metrics_path = str(meta.get("metrics_path") or "").strip()
+    score_start_date = ""
+    score_end_date = ""
+    if scores_path:
+        resolved_scores_path = _resolve_repo_path(scores_path)
+        if resolved_scores_path.exists():
+            score_start_date, score_end_date = _score_date_range(resolved_scores_path)
+    provenance = _score_provenance_from_artifacts(scores_path, metrics_path)
+    artifact_workspace = _artifact_workspace(
+        explicit_workspace=str(meta.get("workspace") or ""),
+        backend=str(meta.get("backend") or provenance["backend"] or ""),
+        path_text=_display_path(target),
+    )
+    return {
+        "id": run_id,
+        "name": str(meta.get("name") or run_id),
+        "result_dir": _display_path(target),
+        "config_path": str(meta.get("config_path") or meta.get("source_config_path") or ""),
+        "config_snapshot_path": str(meta.get("config_snapshot_path") or ""),
+        "logs_path": str(meta.get("logs_path") or ""),
+        "factor_spec_id": str(meta.get("factor_spec_id") or ""),
+        "mode": str(meta.get("mode") or "run_research_config"),
+        "as_of_date": str(meta.get("as_of_date") or ""),
+        "test_month": str(meta.get("test_month") or ""),
+        "test_start_month": str(meta.get("test_start_month") or ""),
+        "test_end_month": str(meta.get("test_end_month") or ""),
+        "factor_panel_path": str(meta.get("factor_panel_path") or ""),
+        "scores_path": scores_path,
+        "metrics_path": metrics_path,
+        "backend": str(meta.get("backend") or provenance["backend"] or ""),
+        "workspace": artifact_workspace,
+        "model": str(meta.get("model") or provenance["model"] or ""),
+        "config_id": str(meta.get("config_id") or provenance["config_id"] or meta.get("factor_spec_id") or ""),
+        "score_start_date": score_start_date,
+        "score_end_date": score_end_date,
+        "metrics": meta.get("metrics", {}),
+        "layer_summary": meta.get("layer_summary", {}),
+        "logs": meta.get("logs", ""),
+        "created_at": str(meta.get("created_at") or ""),
+        "updated_at": datetime.fromtimestamp(target.stat().st_mtime).isoformat(timespec="seconds"),
+        "status": str(meta.get("status") or "completed"),
+    }
+
+
+def list_research_run_summaries(results_root: Path = RESEARCH_RUNS_ROOT, workspace: str = "native") -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
+    normalized_workspace = normalize_workspace(workspace)
+    for entry in _iter_research_run_dirs(results_root):
+        meta = _read_optional_json(entry / "meta.json")
+        if not meta:
+            continue
+        payload = _build_research_run_payload(entry.name, entry, meta)
+        if str(payload.get("workspace") or "native") != normalized_workspace:
+            continue
+        runs.append(payload)
+    return runs
+
+
+def load_research_run_detail(run_id: str, results_root: Path = RESEARCH_RUNS_ROOT) -> dict[str, Any]:
+    safe_run_id = Path(run_id).name
+    target = results_root / safe_run_id
+    meta_path = target / "meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"research run not found: {run_id}")
+    try:
+        meta = _read_json(meta_path)
+    except Exception as exc:
+        raise FileNotFoundError(f"research run is unreadable: {run_id}") from exc
+    return _build_research_run_payload(safe_run_id, target, meta)
+
+
+def list_paper_trade_summaries(results_root: Path = PAPER_RUNS_ROOT, workspace: str = "native") -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    normalized_workspace = normalize_workspace(workspace)
     for entry in _iter_paper_dirs(results_root):
         strategy_state_path = entry / "strategy_state.json"
         meta_path = entry / "meta.json"
@@ -1310,6 +1783,13 @@ def list_paper_trade_summaries(results_root: Path = PAPER_RUNS_ROOT) -> list[dic
             strategy_state = _read_json(strategy_state_path)
             meta = _read_optional_json(meta_path)
         except Exception:
+            continue
+        artifact_workspace = _artifact_workspace(
+            explicit_workspace=str(meta.get("workspace") or ""),
+            backend="",
+            path_text=_display_path(entry),
+        )
+        if artifact_workspace != normalized_workspace:
             continue
         runs.append(
             {
@@ -1320,6 +1800,7 @@ def list_paper_trade_summaries(results_root: Path = PAPER_RUNS_ROOT) -> list[dic
                 "config_path": str(meta.get("config_path") or ""),
                 "trade_date": str(strategy_state.get("summary", {}).get("execution_date", "")),
                 "summary": strategy_state.get("summary", {}),
+                "workspace": artifact_workspace,
             }
         )
     return runs
@@ -1337,6 +1818,15 @@ def load_paper_trade_detail(run_id: str, results_root: Path = PAPER_RUNS_ROOT) -
         meta = _read_optional_json(meta_path)
     except Exception as exc:
         raise FileNotFoundError(f"paper run is unreadable: {run_id}") from exc
+    provenance = _build_artifact_provenance_meta(
+        scores_path=str(meta.get("scores_path") or ""),
+        fallback_config_id=str(meta.get("strategy_id") or ""),
+    )
+    artifact_workspace = _artifact_workspace(
+        explicit_workspace=str(meta.get("workspace") or ""),
+        backend=str(meta.get("backend") or provenance["backend"] or ""),
+        path_text=_display_path(target),
+    )
     return {
         "id": safe_run_id,
         "name": str(meta.get("name") or safe_run_id),
@@ -1345,6 +1835,10 @@ def load_paper_trade_detail(run_id: str, results_root: Path = PAPER_RUNS_ROOT) -
         "created_at": str(meta.get("created_at") or ""),
         "scores_path": str(meta.get("scores_path") or ""),
         "paper_source_kind": str(meta.get("paper_source_kind") or ""),
+        "workspace": artifact_workspace,
+        "backend": str(meta.get("backend") or provenance["backend"] or ""),
+        "model": str(meta.get("model") or provenance["model"] or ""),
+        "config_id": str(meta.get("config_id") or provenance["config_id"] or ""),
         "latest_signal_date": str(meta.get("latest_signal_date") or ""),
         "latest_execution_date": str(meta.get("latest_execution_date") or ""),
         "latest_manifest_path": str(meta.get("latest_manifest_path") or ""),
@@ -1352,8 +1846,8 @@ def load_paper_trade_detail(run_id: str, results_root: Path = PAPER_RUNS_ROOT) -
     }
 
 
-def load_latest_paper_snapshot(strategy_id: str) -> dict[str, Any]:
-    manifest = _read_latest_manifest(strategy_id)
+def load_latest_paper_snapshot(strategy_id: str, latest_root: Path | None = None) -> dict[str, Any]:
+    manifest = _read_latest_manifest(strategy_id, latest_root=latest_root)
     if not manifest:
         raise FileNotFoundError(f"latest manifest not found: {strategy_id}")
 
@@ -1366,6 +1860,10 @@ def load_latest_paper_snapshot(strategy_id: str) -> dict[str, Any]:
         raise FileNotFoundError(f"latest strategy state not found: {strategy_id}")
 
     strategy_state = _read_json(absolute_state_path)
+    provenance = _build_artifact_provenance_meta(
+        scores_path=str(manifest.get("scores_path") or ""),
+        fallback_config_id=str(strategy_id),
+    )
     return {
         "id": strategy_id,
         "name": strategy_id,
@@ -1373,6 +1871,14 @@ def load_latest_paper_snapshot(strategy_id: str) -> dict[str, Any]:
         "scores_path": str(manifest.get("scores_path") or ""),
         "trades_path": str(manifest.get("trades_path") or ""),
         "paper_source_kind": "latest_manifest",
+        "workspace": _artifact_workspace(
+            explicit_workspace=str(manifest.get("workspace") or ""),
+            backend=provenance["backend"],
+            path_text=str(manifest.get("manifest_path") or ""),
+        ),
+        "backend": provenance["backend"],
+        "model": provenance["model"],
+        "config_id": provenance["config_id"],
         "latest_signal_date": str(manifest.get("signal_date") or ""),
         "latest_execution_date": str(manifest.get("execution_date") or ""),
         "latest_manifest_path": str(manifest.get("manifest_path") or ""),
@@ -1384,8 +1890,9 @@ def load_paper_history_detail(
     strategy_id: str,
     config_root: Path | None = None,
     results_root: Path | None = None,
+    latest_root: Path | None = None,
 ) -> dict[str, Any]:
-    manifest = _read_latest_manifest(strategy_id)
+    manifest = _read_latest_manifest(strategy_id, latest_root=latest_root)
     latest_trades_path = str(manifest.get("trades_path") or "").strip()
     latest_state_path = str(manifest.get("strategy_state_path") or "").strip()
     if latest_trades_path and latest_state_path:
@@ -1413,8 +1920,8 @@ def load_paper_history_detail(
     raise FileNotFoundError(f"latest trade log not found: {strategy_id}")
 
 
-def load_latest_paper_lineage(strategy_id: str) -> dict[str, Any]:
-    manifest = _read_latest_manifest(strategy_id)
+def load_latest_paper_lineage(strategy_id: str, latest_root: Path | None = None) -> dict[str, Any]:
+    manifest = _read_latest_manifest(strategy_id, latest_root=latest_root)
     if not manifest:
         raise FileNotFoundError(f"latest manifest not found: {strategy_id}")
 
@@ -1553,8 +2060,9 @@ def _load_simulation_account_snapshot(account_id: str, results_root: Path = SIMU
     }
 
 
-def list_simulation_plan_summaries(results_root: Path = SIMULATION_PLANS_ROOT) -> list[dict[str, Any]]:
+def list_simulation_plan_summaries(results_root: Path = SIMULATION_PLANS_ROOT, workspace: str = "native") -> list[dict[str, Any]]:
     latest_by_account: dict[str, dict[str, Any]] = {}
+    normalized_workspace = normalize_workspace(workspace)
     for entry in _iter_simulation_plan_dirs(results_root):
         strategy_state_path = entry / "strategy_state.json"
         meta_path = entry / "meta.json"
@@ -1570,6 +2078,10 @@ def list_simulation_plan_summaries(results_root: Path = SIMULATION_PLANS_ROOT) -
         if not executed_run_id:
             match = _find_simulation_run_for_plan(entry.name)
             executed_run_id = str(match.get("run_id") or "") if match else ""
+        provenance = _build_artifact_provenance_meta(
+            scores_path=str(meta.get("scores_path") or ""),
+            fallback_config_id=str(meta.get("strategy_id") or ""),
+        )
         item = {
             "id": entry.name,
             "account_id": str(meta.get("account_id") or entry.name),
@@ -1578,6 +2090,14 @@ def list_simulation_plan_summaries(results_root: Path = SIMULATION_PLANS_ROOT) -
             "result_dir": _display_path(entry),
             "updated_at": datetime.fromtimestamp(entry.stat().st_mtime).isoformat(timespec="seconds"),
             "config_path": str(meta.get("config_path") or ""),
+            "backend": str(meta.get("backend") or provenance["backend"] or ""),
+            "workspace": _artifact_workspace(
+                explicit_workspace=str(meta.get("workspace") or ""),
+                backend=str(meta.get("backend") or provenance["backend"] or ""),
+                path_text=_display_path(entry),
+            ),
+            "model": str(meta.get("model") or provenance["model"] or ""),
+            "config_id": str(meta.get("config_id") or provenance["config_id"] or ""),
             "signal_date": str(summary.get("signal_date", "") or ""),
             "trade_date": execution_date,
             "execution_ready": _simulation_bars_ready(storage_root, execution_date) if execution_date else False,
@@ -1587,6 +2107,8 @@ def list_simulation_plan_summaries(results_root: Path = SIMULATION_PLANS_ROOT) -
             "current_node_type": "executed" if executed_run_id else "planned",
             "summary": summary,
         }
+        if str(item.get("workspace") or "native") != normalized_workspace:
+            continue
         existing = latest_by_account.get(item["account_id"])
         if existing is None or (item["trade_date"], item["id"]) > (str(existing.get("trade_date") or ""), str(existing.get("id") or "")):
             latest_by_account[item["account_id"]] = item
@@ -1615,6 +2137,10 @@ def load_simulation_plan_detail(plan_id: str, results_root: Path = SIMULATION_PL
         executed_run_id = str(match.get("run_id") or "") if match else ""
     bars_ready = _simulation_bars_ready(storage_root, execution_date) if execution_date else False
     execution_ready = bool(bars_ready and execution_pending and not executed_run_id)
+    provenance = _build_artifact_provenance_meta(
+        scores_path=str(meta.get("scores_path") or ""),
+        fallback_config_id=str(meta.get("strategy_id") or ""),
+    )
     account_id = str(meta.get("account_id") or safe_plan_id)
     account_snapshot: dict[str, Any] | None = None
     try:
@@ -1644,6 +2170,14 @@ def load_simulation_plan_detail(plan_id: str, results_root: Path = SIMULATION_PL
         "config_path": str(meta.get("config_path") or ""),
         "created_at": str(meta.get("created_at") or ""),
         "scores_path": str(meta.get("scores_path") or ""),
+        "workspace": _artifact_workspace(
+            explicit_workspace=str(meta.get("workspace") or ""),
+            backend=str(meta.get("backend") or provenance["backend"] or ""),
+            path_text=_display_path(target),
+        ),
+        "backend": str(meta.get("backend") or provenance["backend"] or ""),
+        "model": str(meta.get("model") or provenance["model"] or ""),
+        "config_id": str(meta.get("config_id") or provenance["config_id"] or ""),
         "source_kind": str(meta.get("source_kind") or "simulation_plan"),
         "previous_run_id": str(meta.get("previous_run_id") or ""),
         "executed_run_id": executed_run_id,
@@ -1684,8 +2218,9 @@ def load_simulation_plan_detail(plan_id: str, results_root: Path = SIMULATION_PL
     }
 
 
-def list_simulation_summaries(results_root: Path = SIMULATION_RUNS_ROOT) -> list[dict[str, Any]]:
+def list_simulation_summaries(results_root: Path = SIMULATION_RUNS_ROOT, workspace: str = "native") -> list[dict[str, Any]]:
     latest_by_account: dict[str, dict[str, Any]] = {}
+    normalized_workspace = normalize_workspace(workspace)
     for entry in _iter_simulation_run_dirs(results_root):
         strategy_state_path = entry / "strategy_state.json"
         meta_path = entry / "meta.json"
@@ -1695,6 +2230,10 @@ def list_simulation_summaries(results_root: Path = SIMULATION_RUNS_ROOT) -> list
         except Exception:
             continue
         summary = strategy_state.get("summary", {})
+        provenance = _build_artifact_provenance_meta(
+            scores_path=str(meta.get("scores_path") or ""),
+            fallback_config_id=str(meta.get("strategy_id") or ""),
+        )
         item = {
             "id": entry.name,
             "account_id": _simulation_account_id(meta, entry.name),
@@ -1703,9 +2242,19 @@ def list_simulation_summaries(results_root: Path = SIMULATION_RUNS_ROOT) -> list
             "result_dir": _display_path(entry),
             "updated_at": datetime.fromtimestamp(entry.stat().st_mtime).isoformat(timespec="seconds"),
             "config_path": str(meta.get("config_path") or ""),
+            "backend": str(meta.get("backend") or provenance["backend"] or ""),
+            "workspace": _artifact_workspace(
+                explicit_workspace=str(meta.get("workspace") or ""),
+                backend=str(meta.get("backend") or provenance["backend"] or ""),
+                path_text=_display_path(entry),
+            ),
+            "model": str(meta.get("model") or provenance["model"] or ""),
+            "config_id": str(meta.get("config_id") or provenance["config_id"] or ""),
             "trade_date": str(summary.get("execution_date", "")),
             "summary": summary,
         }
+        if str(item.get("workspace") or "native") != normalized_workspace:
+            continue
         existing = latest_by_account.get(item["account_id"])
         if existing is None or (item["trade_date"], item["id"]) > (str(existing.get("trade_date") or ""), str(existing.get("id") or "")):
             latest_by_account[item["account_id"]] = item
@@ -1724,6 +2273,10 @@ def load_simulation_detail(run_id: str, results_root: Path = SIMULATION_RUNS_ROO
         meta = _read_optional_json(meta_path)
     except Exception as exc:
         raise FileNotFoundError(f"simulation run is unreadable: {run_id}") from exc
+    provenance = _build_artifact_provenance_meta(
+        scores_path=str(meta.get("scores_path") or ""),
+        fallback_config_id=str(meta.get("strategy_id") or ""),
+    )
     return {
         "id": safe_run_id,
         "account_id": _simulation_account_id(meta, safe_run_id),
@@ -1733,6 +2286,14 @@ def load_simulation_detail(run_id: str, results_root: Path = SIMULATION_RUNS_ROO
         "config_path": str(meta.get("config_path") or ""),
         "created_at": str(meta.get("created_at") or ""),
         "scores_path": str(meta.get("scores_path") or ""),
+        "workspace": _artifact_workspace(
+            explicit_workspace=str(meta.get("workspace") or ""),
+            backend=str(meta.get("backend") or provenance["backend"] or ""),
+            path_text=_display_path(target),
+        ),
+        "backend": str(meta.get("backend") or provenance["backend"] or ""),
+        "model": str(meta.get("model") or provenance["model"] or ""),
+        "config_id": str(meta.get("config_id") or provenance["config_id"] or ""),
         "source_kind": str(meta.get("source_kind") or ""),
         "previous_state_path": str(meta.get("previous_state_path") or ""),
         "previous_run_id": str(meta.get("previous_run_id") or ""),
@@ -1745,8 +2306,8 @@ def load_simulation_detail(run_id: str, results_root: Path = SIMULATION_RUNS_ROO
     }
 
 
-def load_latest_simulation_snapshot(strategy_id: str) -> dict[str, Any]:
-    manifest = _read_latest_simulation_manifest(strategy_id)
+def load_latest_simulation_snapshot(strategy_id: str, latest_root: Path | None = None) -> dict[str, Any]:
+    manifest = _read_latest_simulation_manifest(strategy_id, results_root=latest_root or SIMULATION_LATEST_ROOT)
     if not manifest:
         raise FileNotFoundError(f"latest simulation manifest not found: {strategy_id}")
     strategy_state_path = str(manifest.get("strategy_state_path") or "").strip()
@@ -1755,6 +2316,10 @@ def load_latest_simulation_snapshot(strategy_id: str) -> dict[str, Any]:
     absolute_state_path = REPO_ROOT / strategy_state_path
     if not absolute_state_path.exists():
         raise FileNotFoundError(f"latest simulation state not found: {strategy_id}")
+    provenance = _build_artifact_provenance_meta(
+        scores_path=str(manifest.get("scores_path") or ""),
+        fallback_config_id=str(strategy_id),
+    )
     return {
         "id": str(manifest.get("run_id") or strategy_id),
         "account_id": str(manifest.get("account_id") or manifest.get("run_id") or strategy_id),
@@ -1762,6 +2327,14 @@ def load_latest_simulation_snapshot(strategy_id: str) -> dict[str, Any]:
         "strategy_id": strategy_id,
         "result_dir": _display_path(absolute_state_path.parent),
         "scores_path": str(manifest.get("scores_path") or ""),
+        "workspace": _artifact_workspace(
+            explicit_workspace=str(manifest.get("workspace") or ""),
+            backend=provenance["backend"],
+            path_text=str(manifest.get("strategy_state_path") or ""),
+        ),
+        "backend": provenance["backend"],
+        "model": provenance["model"],
+        "config_id": provenance["config_id"],
         "source_kind": "simulation_latest",
         "latest_signal_date": str(manifest.get("signal_date") or ""),
         "latest_execution_date": str(manifest.get("execution_date") or ""),
@@ -1959,6 +2532,8 @@ def _build_strategy_state_args(
     mode: str = "historical",
     previous_state_path: str = "",
     simulate_trade_execution: bool = True,
+    write_trade_log: bool = True,
+    write_decision_log: bool = True,
 ) -> StrategyStateConfig:
     return StrategyStateConfig(
         scores_path=scores_path,
@@ -1969,6 +2544,8 @@ def _build_strategy_state_args(
         mode=mode,
         previous_state_path=previous_state_path,
         simulate_trade_execution=simulate_trade_execution,
+        write_trade_log=write_trade_log,
+        write_decision_log=write_decision_log,
         top_k=config.top_k,
         rebalance_every=config.rebalance_every,
         lookback_window=config.lookback_window,
@@ -2031,8 +2608,144 @@ def _build_strategy_state_snapshot(
             trade_date=latest_trade_date,
             initial_cash=initial_cash,
             output_path=(output_dir / "strategy_state_latest.json").as_posix(),
+            write_trade_log=False,
+            write_decision_log=False,
         )
     )
+
+
+def _build_artifact_provenance_meta(scores_path: str = "", metrics_path: str = "", *, fallback_config_id: str = "") -> dict[str, str]:
+    provenance = _score_provenance_from_artifacts(scores_path=scores_path, metrics_path=metrics_path)
+    return {
+        "backend": str(provenance.get("backend") or "native"),
+        "model": str(provenance.get("model") or ""),
+        "config_id": str(provenance.get("config_id") or fallback_config_id or ""),
+    }
+
+
+def _load_qlib_section(config_text: str) -> dict[str, Any]:
+    try:
+        payload = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError:
+        return {}
+    section = payload.get("qlib", {})
+    return section if isinstance(section, dict) else {}
+
+
+def _resolve_qlib_feature_specs(qlib_section: dict[str, Any]) -> tuple[Any, ...]:
+    raw_feature_specs = qlib_section.get("feature_specs")
+    raw_feature_columns = qlib_section.get("feature_columns", ())
+    if raw_feature_columns is not None and not isinstance(raw_feature_columns, (list, tuple)):
+        raise ValueError("qlib.feature_columns must be an array of strings when provided")
+    normalized_feature_columns = None
+    if isinstance(raw_feature_columns, (list, tuple)):
+        normalized_feature_columns = tuple(str(item).strip() for item in raw_feature_columns if str(item).strip())
+    return parse_qlib_feature_specs(
+        feature_specs=raw_feature_specs,
+        feature_columns=normalized_feature_columns,
+    )
+
+
+def _run_qlib_research_pipeline(config_path: str, output_dir: str | Path | None = None) -> dict[str, Any]:
+    config = load_research_config(config_path)
+    resolved_config_path = Path(config_path).resolve()
+    resolved_output_paths = resolve_research_run_output_paths(config, output_dir) if output_dir is not None else None
+    score_output_path = (
+        resolved_output_paths.score_output_path if resolved_output_paths is not None else config.score_output_path
+    )
+    metric_output_path = (
+        resolved_output_paths.metric_output_path if resolved_output_paths is not None else config.metric_output_path
+    )
+    layer_output_path = (
+        resolved_output_paths.layer_output_path if resolved_output_paths is not None else config.layer_output_path
+    )
+    qlib_section = _load_qlib_section(resolved_config_path.read_text(encoding="utf-8"))
+    provider_uri = str(qlib_section.get("provider_uri") or "~/.qlib/qlib_data/cn_data")
+    region = str(qlib_section.get("region") or "cn")
+    market = str(qlib_section.get("market") or "csi300")
+    model_name = str(qlib_section.get("model_name") or "lgbm")
+    config_id = str(qlib_section.get("config_id") or config.factor_spec_id)
+    feature_specs = _resolve_qlib_feature_specs(qlib_section)
+
+    print(
+        "RESEARCH_PIPELINE "
+        f"backend=qlib "
+        f"config={resolved_config_path.as_posix()} "
+        f"config_id={config_id} "
+        f"test_start_month={config.test_start_month} "
+        f"test_end_month={config.test_end_month}"
+    )
+    print(
+        "RESEARCH_STEP "
+        f"name=qlib_train_walk_forward "
+        f"market={market} "
+        f"scores={score_output_path} "
+        f"metrics={metric_output_path}"
+    )
+    training_metrics = train_qlib_walk_forward(
+        QlibWalkForwardConfig(
+            storage_root=config.storage_root,
+            universe_name=config.factor_universe_name,
+            provider_uri=provider_uri,
+            region=region,
+            market=market,
+            config_id=config_id,
+            model_name=model_name,
+            feature_specs=feature_specs,
+            train_window_months=config.train_window_months,
+            validation_window_months=config.validation_window_months,
+            test_start_month=config.test_start_month,
+            test_end_month=config.test_end_month,
+            output_scores_path=score_output_path,
+            output_metrics_path=metric_output_path,
+        )
+    )
+    print(
+        "RESEARCH_STEP_DONE "
+        f"name=qlib_train_walk_forward "
+        f"windows={training_metrics['window_count']} "
+        f"mean_spearman_ic={training_metrics['mean_spearman_ic']} "
+        f"scores={score_output_path}"
+    )
+    print(
+        "RESEARCH_STEP "
+        f"name=analyze_score_layers "
+        f"scores={score_output_path} "
+        f"output={layer_output_path}"
+    )
+    layer_payload = analyze_score_layers(
+        LayeredAnalysisConfig(
+            scores_path=score_output_path,
+            output_path=layer_output_path,
+            bins=5,
+        )
+    )
+    layer_summary = dict(layer_payload.get("summary", {}))
+    print(
+        "RESEARCH_STEP_DONE "
+        f"name=analyze_score_layers "
+        f"rows={layer_summary.get('rows', 0)} "
+        f"mean_top_bottom_spread={float(layer_summary.get('mean_top_bottom_spread', 0.0)):.6f} "
+        f"output={layer_output_path}"
+    )
+    return {
+        "backend": "qlib",
+        "model": model_name,
+        "config_id": config_id,
+        "config_path": resolved_config_path.as_posix(),
+        "factor_path": "",
+        "scores_path": score_output_path,
+        "metrics_path": metric_output_path,
+        "layer_output_path": layer_output_path,
+        "configured_factor_path": config.factor_snapshot_path,
+        "configured_scores_path": config.score_output_path,
+        "configured_metrics_path": config.metric_output_path,
+        "configured_layer_output_path": config.layer_output_path,
+        "training_metrics": training_metrics,
+        "layer_summary": layer_summary,
+        "provider_uri": provider_uri,
+        "market": market,
+    }
 
 
 class BacktestWebApp:
@@ -2050,7 +2763,9 @@ class BacktestWebApp:
         initial_cash: float,
         label: str,
         scores_path: str = "",
+        workspace: str = "",
     ) -> dict[str, Any]:
+        normalized_workspace = normalize_workspace(workspace) if str(workspace).strip() else "native"
         absolute_config = (self.repo_root / config_path).resolve()
         if not absolute_config.exists():
             raise FileNotFoundError(f"config not found: {config_path}")
@@ -2058,7 +2773,12 @@ class BacktestWebApp:
         resolved_scores_path = scores_path or config.score_output_path
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         run_name = f"{timestamp}-{_slugify(label or absolute_config.stem)}"
-        output_dir = (WEB_RUNS_ROOT / run_name).relative_to(self.repo_root).as_posix()
+        output_dir, source_research_run_id = _resolve_backtest_output_dir(
+            resolved_scores_path,
+            run_name,
+            repo_root=self.repo_root,
+            workspace=workspace,
+        )
         job_id = run_name
         job_payload = {
             "id": job_id,
@@ -2069,12 +2789,73 @@ class BacktestWebApp:
             "initial_cash": initial_cash,
             "scores_path": resolved_scores_path,
             "result_dir": output_dir,
+            "source_research_run_id": source_research_run_id,
+            "source_run_type": "research_run_backtest" if source_research_run_id else "web_run",
+            "workspace": normalized_workspace,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "error": "",
         }
         self.job_store.create(job_id, job_payload)
         args = _build_run_args(config, start_date, end_date, initial_cash, output_dir, scores_path=resolved_scores_path)
-        self.executor.submit(self._run_job, job_id, args, config, initial_cash, resolved_scores_path)
+        self.executor.submit(
+            self._run_job,
+            job_id,
+            args,
+            config,
+            initial_cash,
+            resolved_scores_path,
+            source_research_run_id,
+            normalized_workspace,
+        )
+        return job_payload
+
+    def submit_research_config_run(
+        self,
+        config_path: str,
+        config_text: str,
+        backend: str = "native",
+        workspace: str = "",
+    ) -> dict[str, Any]:
+        normalized_workspace = normalize_workspace(workspace) if str(workspace).strip() else "native"
+        paths = resolve_workspace_paths(repo_root=self.repo_root, workspace=workspace)
+        absolute_config = (self.repo_root / config_path).resolve()
+        if not absolute_config.exists():
+            raise FileNotFoundError(f"config not found: {config_path}")
+        normalized_backend = str(backend).strip().lower() or "native"
+        if normalized_backend not in {"native", "qlib"}:
+            raise ValueError(f"unsupported research backend: {backend}")
+        config = load_research_config(absolute_config)
+        resolved_config_text = config_text or absolute_config.read_text(encoding="utf-8")
+        tomllib.loads(resolved_config_text)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        run_name = f"{timestamp}-{_slugify(absolute_config.stem)}-{normalized_backend}-research"
+        output_dir = paths.research_runs_root / run_name
+        job_payload = {
+            "id": run_name,
+            "type": "research_config",
+            "status": "queued",
+            "config_path": _display_path(absolute_config),
+            "mode": "run_research_config" if normalized_backend == "native" else "run_research_config_qlib",
+            "backend": normalized_backend,
+            "workspace": normalized_workspace,
+            "factor_panel_path": config.factor_snapshot_path,
+            "test_start_month": config.test_start_month,
+            "test_end_month": config.test_end_month,
+            "result_dir": _display_path(output_dir),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "error": "",
+            "logs": "",
+        }
+        self.job_store.create(run_name, job_payload)
+        self.executor.submit(
+            self._run_research_config_job,
+            run_name,
+            _display_path(absolute_config),
+            resolved_config_text,
+            output_dir,
+            normalized_backend,
+            normalized_workspace,
+        )
         return job_payload
 
     def submit_paper_trade(
@@ -2084,7 +2865,10 @@ class BacktestWebApp:
         initial_cash: float,
         label: str,
         scores_path: str = "",
+        workspace: str = "",
     ) -> dict[str, Any]:
+        normalized_workspace = normalize_workspace(workspace) if str(workspace).strip() else "native"
+        paths = resolve_workspace_paths(repo_root=self.repo_root, workspace=workspace)
         absolute_config = (self.repo_root / config_path).resolve()
         if not absolute_config.exists():
             raise FileNotFoundError(f"config not found: {config_path}")
@@ -2093,10 +2877,11 @@ class BacktestWebApp:
             scores_path,
             absolute_config.stem,
             config.score_output_path,
+            latest_root=paths.research_models_root / "latest",
         )
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         run_name = f"{timestamp}-{_slugify(label or absolute_config.stem)}"
-        output_dir = self.repo_root / PAPER_RUNS_ROOT.relative_to(self.repo_root) / run_name
+        output_dir = paths.paper_runs_root / run_name
         job_id = run_name
         job_payload = {
             "id": job_id,
@@ -2107,6 +2892,7 @@ class BacktestWebApp:
             "initial_cash": initial_cash,
             "scores_path": paper_scores_path,
             "paper_source_kind": paper_source_kind,
+            "workspace": normalized_workspace,
             "result_dir": _display_path(output_dir),
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "error": "",
@@ -2124,6 +2910,7 @@ class BacktestWebApp:
             label or absolute_config.stem,
             config_path,
             manifest,
+            workspace,
         )
         return job_payload
 
@@ -2132,7 +2919,9 @@ class BacktestWebApp:
         config_path: str,
         trade_date: str,
         scores_path: str = "",
+        workspace: str = "",
     ) -> dict[str, Any]:
+        normalized_workspace = normalize_workspace(workspace) if str(workspace).strip() else "native"
         absolute_config = (self.repo_root / config_path).resolve()
         if not absolute_config.exists():
             raise FileNotFoundError(f"config not found: {config_path}")
@@ -2141,6 +2930,7 @@ class BacktestWebApp:
             scores_path,
             absolute_config.stem,
             config.score_output_path,
+            latest_root=resolve_workspace_paths(repo_root=self.repo_root, workspace=workspace).research_models_root / "latest",
         )
         if not bool(manifest.get("supports_incremental_update", False)):
             raise ValueError(f"selected scores source does not support incremental update: {resolved_scores_path}")
@@ -2153,11 +2943,12 @@ class BacktestWebApp:
             "config_path": config_path,
             "trade_date": trade_date,
             "scores_path": resolved_scores_path,
+            "workspace": normalized_workspace,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "error": "",
         }
         self.job_store.create(job_id, job_payload)
-        self.executor.submit(self._run_fill_scores_job, job_id, config_path, trade_date, resolved_scores_path)
+        self.executor.submit(self._run_fill_scores_job, job_id, config_path, trade_date, resolved_scores_path, workspace)
         return job_payload
 
     def submit_simulation_plan(
@@ -2166,7 +2957,10 @@ class BacktestWebApp:
         signal_date: str,
         initial_cash: float,
         label: str,
+        workspace: str = "",
     ) -> dict[str, Any]:
+        normalized_workspace = normalize_workspace(workspace) if str(workspace).strip() else "native"
+        paths = resolve_workspace_paths(repo_root=self.repo_root, workspace=workspace)
         absolute_config = (self.repo_root / config_path).resolve()
         if not absolute_config.exists():
             raise FileNotFoundError(f"config not found: {config_path}")
@@ -2176,7 +2970,7 @@ class BacktestWebApp:
         run_name = f"{timestamp}-{_slugify(label or absolute_config.stem)}"
         job_id = run_name
         account_id = job_id
-        output_dir = _simulation_plan_dir(account_id, run_name)
+        output_dir = _simulation_plan_dir(account_id, run_name, results_root=paths.simulation_plans_root)
         job_payload = {
             "id": job_id,
             "account_id": account_id,
@@ -2188,6 +2982,7 @@ class BacktestWebApp:
             "initial_cash": initial_cash,
             "scores_path": resolve_dated_output_path(config.score_output_path, signal_date),
             "source_kind": "simulation_plan",
+            "workspace": normalized_workspace,
             "result_dir": _display_path(output_dir),
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "error": "",
@@ -2195,8 +2990,7 @@ class BacktestWebApp:
             "previous_state_path": "",
         }
         self.job_store.create(job_id, job_payload)
-        self.executor.submit(
-            self._run_simulation_plan_job,
+        plan_args = [
             job_id,
             absolute_config.stem,
             config,
@@ -2209,17 +3003,22 @@ class BacktestWebApp:
             account_id,
             "",
             "",
-        )
+        ]
+        if str(workspace).strip():
+            plan_args.append(workspace)
+        self.executor.submit(self._run_simulation_plan_job, *plan_args)
         return job_payload
 
-    def submit_simulation_next_plan(self, plan_id: str) -> dict[str, Any]:
-        detail = load_simulation_plan_detail(plan_id, results_root=SIMULATION_PLANS_ROOT)
+    def submit_simulation_next_plan(self, plan_id: str, workspace: str = "") -> dict[str, Any]:
+        normalized_workspace = normalize_workspace(workspace) if str(workspace).strip() else "native"
+        paths = resolve_workspace_paths(repo_root=self.repo_root, workspace=workspace)
+        detail = load_simulation_plan_detail(plan_id, results_root=paths.simulation_plans_root)
         executed_run_id = str(detail.get("executed_run_id") or "").strip()
         if not bool(detail.get("next_plan_ready")):
             raise ValueError(str(detail.get("next_plan_message") or "next simulation plan is not ready"))
         execution_pending = bool(detail.get("execution_pending"))
         if executed_run_id:
-            run_detail = load_simulation_detail(executed_run_id, results_root=SIMULATION_RUNS_ROOT)
+            run_detail = load_simulation_detail(executed_run_id, results_root=paths.simulation_runs_root)
             config_path = str(run_detail.get("config_path") or "").strip()
             strategy_state = run_detail.get("strategy_state", {})
             summary = strategy_state.get("summary", {}) if isinstance(strategy_state, dict) else {}
@@ -2240,7 +3039,7 @@ class BacktestWebApp:
             signal_date = str(summary.get("execution_date") or "").strip()
             initial_cash = float(strategy_state.get("strategy_config", {}).get("initial_cash") or 0.0)
             account_id = str(detail.get("account_id") or detail.get("id") or "").strip()
-            plan_dir = _resolve_simulation_plan_dir(plan_id, results_root=SIMULATION_PLANS_ROOT)
+            plan_dir = _resolve_simulation_plan_dir(plan_id, results_root=paths.simulation_plans_root)
             previous_strategy_state_path = (plan_dir / "strategy_state.json").as_posix()
             previous_run_id = str(detail.get("previous_run_id") or "")
         if not config_path:
@@ -2260,7 +3059,7 @@ class BacktestWebApp:
         next_label = str(detail.get("name") or absolute_config.stem)
         run_name = f"{timestamp}-{_slugify(next_label)}"
         job_id = run_name
-        output_dir = _simulation_plan_dir(account_id or job_id, run_name)
+        output_dir = _simulation_plan_dir(account_id or job_id, run_name, results_root=paths.simulation_plans_root)
         job_payload = {
             "id": job_id,
             "account_id": account_id or job_id,
@@ -2272,6 +3071,7 @@ class BacktestWebApp:
             "initial_cash": initial_cash,
             "scores_path": resolve_dated_output_path(config.score_output_path, signal_date),
             "source_kind": "simulation_plan_roll_forward",
+            "workspace": normalized_workspace,
             "result_dir": _display_path(output_dir),
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "error": "",
@@ -2279,8 +3079,7 @@ class BacktestWebApp:
             "previous_state_path": _display_path(Path(previous_strategy_state_path)),
         }
         self.job_store.create(job_id, job_payload)
-        self.executor.submit(
-            self._run_simulation_plan_job,
+        plan_args = [
             job_id,
             absolute_config.stem,
             config,
@@ -2293,11 +3092,16 @@ class BacktestWebApp:
             account_id,
             previous_strategy_state_path,
             previous_run_id,
-        )
+        ]
+        if str(workspace).strip():
+            plan_args.append(workspace)
+        self.executor.submit(self._run_simulation_plan_job, *plan_args)
         return job_payload
 
-    def submit_simulation_execute_plan(self, plan_id: str, label: str = "") -> dict[str, Any]:
-        detail = load_simulation_plan_detail(plan_id, results_root=SIMULATION_PLANS_ROOT)
+    def submit_simulation_execute_plan(self, plan_id: str, label: str = "", workspace: str = "") -> dict[str, Any]:
+        normalized_workspace = normalize_workspace(workspace) if str(workspace).strip() else "native"
+        paths = resolve_workspace_paths(repo_root=self.repo_root, workspace=workspace)
+        detail = load_simulation_plan_detail(plan_id, results_root=paths.simulation_plans_root)
         if not bool(detail.get("execution_pending")):
             raise ValueError(str(detail.get("execution_message") or f"simulation plan does not require execution: {plan_id}"))
         config_path = str(detail.get("config_path") or "").strip()
@@ -2319,12 +3123,12 @@ class BacktestWebApp:
             raise ValueError(f"execution date bars not ready: {execution_date}")
         initial_cash = float(strategy_state.get("strategy_config", {}).get("initial_cash") or config.initial_cash)
         account_id = str(detail.get("account_id") or detail.get("id") or "").strip()
-        plan_dir = _resolve_simulation_plan_dir(plan_id, results_root=SIMULATION_PLANS_ROOT)
+        plan_dir = _resolve_simulation_plan_dir(plan_id, results_root=paths.simulation_plans_root)
         previous_strategy_state_path = (plan_dir / "strategy_state.json").as_posix()
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         next_label = label or str(detail.get("name") or absolute_config.stem)
         run_name = f"{timestamp}-{_slugify(next_label)}"
-        output_dir = _simulation_run_dir(account_id or run_name, run_name)
+        output_dir = _simulation_run_dir(account_id or run_name, run_name, results_root=paths.simulation_runs_root)
         job_id = run_name
         job_payload = {
             "id": job_id,
@@ -2337,6 +3141,7 @@ class BacktestWebApp:
             "initial_cash": initial_cash,
             "scores_path": resolve_dated_output_path(config.score_output_path, signal_date),
             "source_kind": "simulation_plan_execute",
+            "workspace": normalized_workspace,
             "result_dir": _display_path(output_dir),
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "error": "",
@@ -2345,8 +3150,7 @@ class BacktestWebApp:
             "previous_state_path": _display_path(Path(previous_strategy_state_path)),
         }
         self.job_store.create(job_id, job_payload)
-        self.executor.submit(
-            self._run_simulation_execute_job,
+        execute_args = [
             job_id,
             absolute_config.stem,
             config,
@@ -2360,7 +3164,10 @@ class BacktestWebApp:
             str(detail.get("previous_run_id") or ""),
             account_id or job_id,
             str(detail.get("id") or ""),
-        )
+        ]
+        if str(workspace).strip():
+            execute_args.append(workspace)
+        self.executor.submit(self._run_simulation_execute_job, *execute_args)
         return job_payload
 
     def submit_simulation_fill_scores(
@@ -2368,8 +3175,14 @@ class BacktestWebApp:
         config_path: str,
         trade_date: str,
         scores_path: str = "",
+        workspace: str = "",
     ) -> dict[str, Any]:
-        return self.submit_paper_fill_scores(config_path=config_path, trade_date=trade_date, scores_path=scores_path)
+        return self.submit_paper_fill_scores(
+            config_path=config_path,
+            trade_date=trade_date,
+            scores_path=scores_path,
+            workspace=workspace,
+        )
 
     def submit_simulation(
         self,
@@ -2377,12 +3190,14 @@ class BacktestWebApp:
         signal_date: str,
         initial_cash: float,
         label: str,
+        workspace: str = "",
     ) -> dict[str, Any]:
         return self.submit_simulation_plan(
             config_path=config_path,
             signal_date=signal_date,
             initial_cash=initial_cash,
             label=label,
+            workspace=workspace,
         )
 
     def submit_simulation_roll_forward(self, run_id: str, label: str = "") -> dict[str, Any]:
@@ -2455,6 +3270,8 @@ class BacktestWebApp:
         config: ResearchRunConfig,
         initial_cash: float,
         scores_path: str | None = None,
+        source_research_run_id: str = "",
+        workspace: str = "",
     ) -> None:
         self.job_store.update(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
         try:
@@ -2506,6 +3323,33 @@ class BacktestWebApp:
                     output_dir=args["output_dir"],
                 )
                 _build_strategy_state_snapshot(config, initial_cash, output_dir, scores_path=scores_path)
+                (output_dir / "meta.json").write_text(
+                    json.dumps(
+                        {
+                            "id": job_id,
+                            "name": job_id,
+                            "config_path": "",
+                            "source_config_path": "",
+                            "scores_path": scores_path or args["scores_path"],
+                            "source_scores_path": scores_path or args["scores_path"],
+                            "source_research_run_id": source_research_run_id,
+                            "source_run_type": "research_run_backtest" if source_research_run_id else "web_run",
+                            "workspace": normalize_workspace(workspace) if str(workspace).strip() else "native",
+                            "result_dir": args["output_dir"],
+                            "backtest_start_date": args["start_date"],
+                            "backtest_end_date": args["end_date"],
+                            "initial_cash": args["initial_cash"],
+                            "created_at": datetime.now().isoformat(timespec="seconds"),
+                            **_build_artifact_provenance_meta(
+                                scores_path=scores_path or args["scores_path"],
+                                fallback_config_id=config.factor_spec_id,
+                            ),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
             finally:
                 os.chdir(cwd)
             self.job_store.update(
@@ -2533,6 +3377,7 @@ class BacktestWebApp:
         label: str,
         config_path: str,
         manifest: dict[str, Any],
+        workspace: str = "",
     ) -> None:
         self.job_store.update(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
         try:
@@ -2553,10 +3398,12 @@ class BacktestWebApp:
                         "initial_cash": initial_cash,
                         "scores_path": scores_path,
                         "paper_source_kind": paper_source_kind,
+                        "workspace": normalize_workspace(workspace) if str(workspace).strip() else "native",
                         "latest_signal_date": str(manifest.get("signal_date") or ""),
                         "latest_execution_date": str(manifest.get("execution_date") or ""),
                         "latest_manifest_path": str(manifest.get("manifest_path") or ""),
                         "created_at": datetime.now().isoformat(timespec="seconds"),
+                        **_build_artifact_provenance_meta(scores_path=scores_path, fallback_config_id=config.factor_spec_id),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -2576,12 +3423,110 @@ class BacktestWebApp:
                 finished_at=datetime.now().isoformat(timespec="seconds"),
             )
 
+    def _run_research_config_job(
+        self,
+        job_id: str,
+        config_path: str,
+        config_text: str,
+        output_dir: Path,
+        backend: str = "native",
+        workspace: str = "",
+    ) -> None:
+        self.job_store.update(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            config_snapshot_path = output_dir / "config.toml"
+            logs_path = output_dir / "logs.txt"
+            config_snapshot_path.write_text(config_text, encoding="utf-8")
+            config = load_research_config(config_snapshot_path)
+            run_output_paths = resolve_research_run_output_paths(config, output_dir)
+            log_buffer = io.StringIO()
+
+            class _JobLogWriter:
+                def __init__(self, buffer: io.StringIO, job_store: JobStore, current_job_id: str, log_path: Path) -> None:
+                    self.buffer = buffer
+                    self.job_store = job_store
+                    self.current_job_id = current_job_id
+                    self.log_path = log_path
+
+                def write(self, text: str) -> int:
+                    written = self.buffer.write(text)
+                    self.log_path.write_text(self.buffer.getvalue(), encoding="utf-8")
+                    self.job_store.update(self.current_job_id, logs=self.buffer.getvalue())
+                    return written
+
+                def flush(self) -> None:
+                    self.log_path.write_text(self.buffer.getvalue(), encoding="utf-8")
+
+            normalized_backend = str(backend).strip().lower() or "native"
+            with redirect_stdout(_JobLogWriter(log_buffer, self.job_store, job_id, logs_path)):
+                if normalized_backend == "qlib":
+                    payload = _run_qlib_research_pipeline(config_snapshot_path.as_posix(), output_dir=output_dir)
+                else:
+                    payload = run_research_pipeline(config_snapshot_path.as_posix(), output_dir=output_dir)
+
+            meta_payload = {
+                "name": Path(config_path).stem.replace("_", " "),
+                "status": "completed",
+                "backend": str(payload.get("backend") or normalized_backend),
+                "workspace": normalize_workspace(workspace) if str(workspace).strip() else "native",
+                "model": str(payload.get("model") or "lgbm"),
+                "config_id": str(payload.get("config_id") or config.factor_spec_id),
+                "config_path": config_path,
+                "source_config_path": config_path,
+                "config_snapshot_path": _display_path(config_snapshot_path),
+                "logs_path": _display_path(logs_path),
+                "mode": "run_research_config" if normalized_backend == "native" else "run_research_config_qlib",
+                "factor_spec_id": config.factor_spec_id,
+                "test_start_month": config.test_start_month,
+                "test_end_month": config.test_end_month,
+                "factor_panel_path": str(payload.get("factor_path") or run_output_paths.factor_snapshot_path),
+                "scores_path": str(payload.get("scores_path") or run_output_paths.score_output_path),
+                "metrics_path": str(payload.get("metrics_path") or run_output_paths.metric_output_path),
+                "layer_output_path": str(payload.get("layer_output_path") or run_output_paths.layer_output_path),
+                "provider_uri": str(payload.get("provider_uri") or ""),
+                "market": str(payload.get("market") or ""),
+                "model_backtest_output_dir": run_output_paths.model_backtest_output_dir,
+                "configured_factor_panel_path": config.factor_snapshot_path,
+                "configured_scores_path": config.score_output_path,
+                "configured_metrics_path": config.metric_output_path,
+                "configured_layer_output_path": config.layer_output_path,
+                "configured_model_backtest_output_dir": config.model_backtest_output_dir,
+                "metrics": payload.get("training_metrics", {}),
+                "layer_summary": payload.get("layer_summary", {}),
+                "logs": log_buffer.getvalue(),
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            (output_dir / "meta.json").write_text(
+                json.dumps(
+                    meta_payload,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            self.job_store.update(
+                job_id,
+                status="completed",
+                result={"run_id": job_id},
+                logs=log_buffer.getvalue(),
+                finished_at=datetime.now().isoformat(timespec="seconds"),
+            )
+        except Exception as exc:
+            self.job_store.update(
+                job_id,
+                status="failed",
+                error=str(exc),
+                finished_at=datetime.now().isoformat(timespec="seconds"),
+            )
+
     def _run_fill_scores_job(
         self,
         job_id: str,
         config_path: str,
         trade_date: str,
         scores_path: str,
+        workspace: str = "",
     ) -> None:
         self.job_store.update(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
         try:
@@ -2590,6 +3535,7 @@ class BacktestWebApp:
                 trade_date=trade_date,
                 scores_path=scores_path,
                 repo_root=self.repo_root,
+                latest_root=resolve_workspace_paths(repo_root=self.repo_root, workspace=workspace).research_models_root / "latest",
             )
             self.job_store.update(
                 job_id,
@@ -2619,6 +3565,7 @@ class BacktestWebApp:
         account_id: str = "",
         previous_state_path: str = "",
         previous_run_id: str = "",
+        workspace: str = "",
     ) -> None:
         self._run_simulation_job(
             job_id=job_id,
@@ -2636,6 +3583,7 @@ class BacktestWebApp:
             source_kind="simulation_plan",
             simulate_trade_execution=False,
             update_latest_manifest=False,
+            workspace=workspace,
         )
 
     def _run_simulation_execute_job(
@@ -2653,6 +3601,7 @@ class BacktestWebApp:
         previous_run_id: str = "",
         account_id: str = "",
         plan_id: str = "",
+        workspace: str = "",
     ) -> None:
         self._run_simulation_job(
             job_id=job_id,
@@ -2671,6 +3620,7 @@ class BacktestWebApp:
             simulate_trade_execution=True,
             update_latest_manifest=True,
             plan_id=plan_id,
+            workspace=workspace,
         )
 
     def _run_simulation_job(
@@ -2692,7 +3642,10 @@ class BacktestWebApp:
         simulate_trade_execution: bool = True,
         update_latest_manifest: bool = True,
         plan_id: str = "",
+        workspace: str = "",
     ) -> None:
+        normalized_workspace = normalize_workspace(workspace) if str(workspace).strip() else "native"
+        paths = resolve_workspace_paths(repo_root=self.repo_root, workspace=workspace)
         self.job_store.update(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
         try:
             LOGGER.info(
@@ -2761,12 +3714,14 @@ class BacktestWebApp:
                 "initial_cash": initial_cash,
                 "scores_path": scores_path,
                 "source_kind": source_kind,
+                "workspace": normalized_workspace,
                 "factor_panel_path": factor_panel_path,
                 "factor_built": factor_built,
                 "previous_state_path": resolved_previous_state_path,
                 "previous_run_id": resolved_previous_run_id,
                 "plan_id": plan_id,
                 "created_at": datetime.now().isoformat(timespec="seconds"),
+                **_build_artifact_provenance_meta(scores_path=scores_path, fallback_config_id=config.factor_spec_id),
             }
             (output_dir / "meta.json").write_text(
                 json.dumps(meta_payload, ensure_ascii=False, indent=2),
@@ -2778,7 +3733,7 @@ class BacktestWebApp:
                 strategy_state=strategy_state,
                 node_dir=output_dir,
                 append_account_trades=simulate_trade_execution,
-                results_root=SIMULATION_ACCOUNTS_ROOT,
+                results_root=paths.simulation_accounts_root,
             )
             _append_simulation_account_event(
                 meta_payload["account_id"],
@@ -2792,7 +3747,7 @@ class BacktestWebApp:
                     "execution_date": execution_date,
                     "source_kind": source_kind,
                 },
-                results_root=SIMULATION_ACCOUNTS_ROOT,
+                results_root=paths.simulation_accounts_root,
             )
             if update_latest_manifest:
                 manifest_payload = {
@@ -2803,15 +3758,20 @@ class BacktestWebApp:
                     "signal_date": str(strategy_state.get("summary", {}).get("signal_date", "")),
                     "execution_date": str(strategy_state.get("summary", {}).get("execution_date", "")),
                     "scores_path": scores_path,
-                    "strategy_state_path": _simulation_account_state_path(meta_payload["account_id"]).relative_to(self.repo_root).as_posix(),
-                    "trades_path": _simulation_account_trades_path(meta_payload["account_id"]).relative_to(self.repo_root).as_posix(),
-                    "decision_log_path": _simulation_account_decision_log_path(meta_payload["account_id"]).relative_to(self.repo_root).as_posix(),
+                    "workspace": normalized_workspace,
+                    "strategy_state_path": _simulation_account_state_path(meta_payload["account_id"], results_root=paths.simulation_accounts_root).relative_to(self.repo_root).as_posix(),
+                    "trades_path": _simulation_account_trades_path(meta_payload["account_id"], results_root=paths.simulation_accounts_root).relative_to(self.repo_root).as_posix(),
+                    "decision_log_path": _simulation_account_decision_log_path(meta_payload["account_id"], results_root=paths.simulation_accounts_root).relative_to(self.repo_root).as_posix(),
                     "previous_run_id": meta_payload["previous_run_id"],
                 }
-                _write_latest_simulation_manifest(strategy_id, manifest_payload)
+                _write_latest_simulation_manifest(strategy_id, manifest_payload, results_root=paths.simulation_latest_root)
             if plan_id:
-                plan_detail = load_simulation_plan_detail(plan_id, results_root=SIMULATION_PLANS_ROOT)
-                plan_meta_path = _simulation_plan_dir(str(plan_detail.get("account_id") or ""), plan_id) / "meta.json"
+                plan_detail = load_simulation_plan_detail(plan_id, results_root=paths.simulation_plans_root)
+                plan_meta_path = _simulation_plan_dir(
+                    str(plan_detail.get("account_id") or ""),
+                    plan_id,
+                    results_root=paths.simulation_plans_root,
+                ) / "meta.json"
                 if plan_meta_path.exists():
                     plan_meta = _read_optional_json(plan_meta_path)
                     plan_meta["executed_run_id"] = job_id
@@ -2850,11 +3810,17 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query)
+        workspace = self._read_workspace_from_query(query)
+        paths = workspace_paths(repo_root=self.app.repo_root, workspace=workspace)
         if path == "/":
             self._serve_file(STATIC_ROOT / "dashboard.html", "text/html; charset=utf-8")
             return
         if path == "/backtest":
             self._serve_file(STATIC_ROOT / "index.html", "text/html; charset=utf-8")
+            return
+        if path == "/research":
+            self._serve_file(STATIC_ROOT / "research.html", "text/html; charset=utf-8")
             return
         if path == "/dashboard":
             self._serve_file(STATIC_ROOT / "dashboard.html", "text/html; charset=utf-8")
@@ -2872,43 +3838,87 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._serve_file(STATIC_ROOT / relative, content_type)
             return
         if path == "/api/strategies":
-            presets = [preset.__dict__ for preset in list_strategy_presets()]
+            presets = [
+                preset.__dict__
+                for preset in list_strategy_presets(
+                    config_root=paths.config_root,
+                    workspace=workspace,
+                    latest_root=paths.research_models_root / "latest",
+                )
+            ]
             self._send_json(
                 {
+                    "workspace": workspace,
                     "strategies": presets,
                     "score_files": _score_file_payload_for_presets(
                         [StrategyPreset(**preset) for preset in presets],
                         include_single_day=False,
+                        models_root=paths.research_models_root,
+                        research_runs_root=paths.research_runs_root,
+                        manifest_path=paths.score_manifest_path,
+                        workspace=workspace,
                     ),
                 }
             )
             return
-        if path == "/api/paper/strategies":
-            presets = [preset.__dict__ for preset in list_strategy_presets()]
+        if path == "/api/research/configs":
             self._send_json(
                 {
+                    "workspace": workspace,
+                    "configs": list_research_strategy_presets(config_root=paths.config_root, workspace=workspace),
+                }
+            )
+            return
+        if path == "/api/paper/strategies":
+            presets = [
+                preset.__dict__
+                for preset in list_strategy_presets(
+                    config_root=paths.config_root,
+                    workspace=workspace,
+                    latest_root=paths.research_models_root / "latest",
+                )
+            ]
+            self._send_json(
+                {
+                    "workspace": workspace,
                     "strategies": presets,
                     "score_files": _score_file_payload_for_presets(
                         [StrategyPreset(**preset) for preset in presets],
                         include_single_day=False,
+                        models_root=paths.research_models_root,
+                        research_runs_root=paths.research_runs_root,
+                        manifest_path=paths.score_manifest_path,
+                        workspace=workspace,
                     ),
                 }
             )
             return
         if path == "/api/simulation/strategies":
-            presets = [preset.__dict__ for preset in list_strategy_presets()]
+            presets = [
+                preset.__dict__
+                for preset in list_strategy_presets(
+                    config_root=paths.config_root,
+                    workspace=workspace,
+                    latest_root=paths.research_models_root / "latest",
+                )
+            ]
             self._send_json(
                 {
+                    "workspace": workspace,
                     "strategies": presets,
                     "score_files": _score_file_payload_for_presets(
                         [StrategyPreset(**preset) for preset in presets],
                         include_single_day=True,
+                        models_root=paths.research_models_root,
+                        research_runs_root=paths.research_runs_root,
+                        manifest_path=paths.score_manifest_path,
+                        workspace=workspace,
                     ),
                 }
             )
             return
         if path == "/api/dashboard/summary":
-            self._send_json(build_dashboard_summary(repo_root=self.app.repo_root, config_root=CONFIG_ROOT))
+            self._send_json(build_dashboard_summary(repo_root=self.app.repo_root, config_root=paths.config_root, workspace=workspace))
             return
         if path == "/api/paper/readiness":
             config_path = str(parse_qs(parsed.query).get("config_path", [""])[0]).strip()
@@ -2918,7 +3928,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "missing_required_fields"}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                payload = build_paper_readiness(config_path=config_path, trade_date=trade_date, scores_path=scores_path)
+                payload = build_paper_readiness(
+                    config_path=config_path,
+                    trade_date=trade_date,
+                    scores_path=scores_path,
+                    latest_root=paths.research_models_root / "latest",
+                )
             except (FileNotFoundError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -2940,16 +3955,28 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
         if path == "/api/runs":
-            self._send_json({"runs": list_run_summaries()[:40]})
+            self._send_json({"workspace": workspace, "runs": list_run_summaries(results_root=paths.results_root, workspace=workspace)[:40]})
+            return
+        if path == "/api/research/runs":
+            self._send_json(
+                {"workspace": workspace, "runs": list_research_run_summaries(results_root=paths.research_runs_root, workspace=workspace)[:40]}
+            )
             return
         if path == "/api/paper/runs":
-            self._send_json({"runs": list_paper_trade_summaries()[:40]})
+            self._send_json({"workspace": workspace, "runs": list_paper_trade_summaries(results_root=paths.paper_runs_root, workspace=workspace)[:40]})
             return
         if path == "/api/simulation/plans":
-            self._send_json({"plans": list_simulation_plan_summaries()[:60]})
+            self._send_json(
+                {
+                    "workspace": workspace,
+                    "plans": list_simulation_plan_summaries(results_root=paths.simulation_plans_root, workspace=workspace)[:60],
+                }
+            )
             return
         if path == "/api/simulation/runs":
-            self._send_json({"runs": list_simulation_summaries()[:60]})
+            self._send_json(
+                {"workspace": workspace, "runs": list_simulation_summaries(results_root=paths.simulation_runs_root, workspace=workspace)[:60]}
+            )
             return
         if path == "/api/paper/latest":
             strategy_id = Path(parse_qs(parsed.query).get("strategy_id", [""])[0]).name
@@ -2957,7 +3984,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "missing_strategy_id"}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                detail = load_latest_paper_snapshot(strategy_id)
+                detail = load_latest_paper_snapshot(strategy_id, latest_root=paths.research_models_root / "latest")
             except FileNotFoundError:
                 self._send_json({"error": "latest_snapshot_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -2969,7 +3996,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "missing_strategy_id"}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                detail = load_latest_simulation_snapshot(strategy_id)
+                detail = load_latest_simulation_snapshot(strategy_id, latest_root=paths.simulation_latest_root)
             except FileNotFoundError:
                 self._send_json({"error": "latest_simulation_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -2981,7 +4008,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "missing_strategy_id"}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                detail = load_paper_history_detail(strategy_id)
+                detail = load_paper_history_detail(strategy_id, latest_root=paths.research_models_root / "latest")
             except FileNotFoundError:
                 self._send_json({"error": "history_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -2994,7 +4021,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "missing_strategy_id"}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                detail = load_simulation_history_detail(strategy_id, run_id=run_id)
+                detail = load_simulation_history_detail(strategy_id, run_id=run_id, results_root=paths.simulation_runs_root)
             except FileNotFoundError:
                 self._send_json({"error": "simulation_history_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -3006,7 +4033,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "missing_strategy_id"}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                detail = load_latest_paper_lineage(strategy_id)
+                detail = load_latest_paper_lineage(strategy_id, latest_root=paths.research_models_root / "latest")
             except FileNotFoundError:
                 self._send_json({"error": "lineage_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -3019,7 +4046,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "missing_strategy_id"}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                detail = load_simulation_lineage(strategy_id, run_id=run_id)
+                detail = load_simulation_lineage(strategy_id, run_id=run_id, results_root=paths.simulation_runs_root)
             except FileNotFoundError:
                 self._send_json({"error": "simulation_lineage_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -3028,16 +4055,41 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/runs/"):
             run_id = path.split("/api/runs/", 1)[1]
             try:
-                detail = load_run_detail(run_id)
+                detail = load_run_detail(run_id, results_root=paths.results_root)
             except FileNotFoundError:
                 self._send_json({"error": "run_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
             self._send_json(detail)
             return
+        if path.startswith("/api/research/runs/"):
+            run_id = path.split("/api/research/runs/", 1)[1]
+            try:
+                detail = load_research_run_detail(run_id, results_root=paths.research_runs_root)
+            except FileNotFoundError:
+                self._send_json({"error": "research_run_not_found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._send_json(detail)
+            return
+        if path.startswith("/api/research/configs/"):
+            config_id = Path(path.split("/api/research/configs/", 1)[1]).name
+            if not config_id:
+                self._send_json({"error": "config_not_found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            try:
+                config_candidates = [path for path in _iter_workspace_config_paths(paths.config_root, workspace) if path.stem == config_id]
+                if not config_candidates:
+                    raise FileNotFoundError(config_id)
+                config_path = config_candidates[0].relative_to(self.app.repo_root).as_posix()
+                payload = load_research_config_text(config_path, repo_root=self.app.repo_root)
+            except (FileNotFoundError, ValueError):
+                self._send_json({"error": "config_not_found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._send_json(payload)
+            return
         if path.startswith("/api/paper/runs/"):
             run_id = path.split("/api/paper/runs/", 1)[1]
             try:
-                detail = load_paper_trade_detail(run_id)
+                detail = load_paper_trade_detail(run_id, results_root=paths.paper_runs_root)
             except FileNotFoundError:
                 self._send_json({"error": "paper_run_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -3046,7 +4098,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/simulation/runs/"):
             run_id = path.split("/api/simulation/runs/", 1)[1]
             try:
-                detail = load_simulation_detail(run_id)
+                detail = load_simulation_detail(run_id, results_root=paths.simulation_runs_root)
             except FileNotFoundError:
                 self._send_json({"error": "simulation_run_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -3055,7 +4107,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/simulation/plans/"):
             plan_id = path.split("/api/simulation/plans/", 1)[1].split("/", 1)[0]
             try:
-                detail = load_simulation_plan_detail(plan_id)
+                detail = load_simulation_plan_detail(plan_id, results_root=paths.simulation_plans_root)
             except FileNotFoundError:
                 self._send_json({"error": "simulation_plan_not_found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -3072,7 +4124,21 @@ class RequestHandler(BaseHTTPRequestHandler):
                 result_dir = job.get("result_dir", "")
                 run_id = Path(result_dir).name
                 try:
-                    payload["run"] = load_run_detail(run_id)
+                    payload["run"] = load_run_detail(run_id, results_root=paths.results_root)
+                except FileNotFoundError:
+                    pass
+            self._send_json(payload)
+            return
+        if path.startswith("/api/research/jobs/"):
+            job_id = path.split("/api/research/jobs/", 1)[1]
+            job = self.app.job_store.get(job_id)
+            if job is None or job.get("type") not in {"research_walk_forward", "research_single_date", "research_config"}:
+                self._send_json({"error": "job_not_found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            payload = {"job": job}
+            if job.get("status") == "completed":
+                try:
+                    payload["run"] = load_research_run_detail(job_id, results_root=paths.research_runs_root)
                 except FileNotFoundError:
                     pass
             self._send_json(payload)
@@ -3088,7 +4154,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 result_dir = job.get("result_dir", "")
                 run_id = Path(result_dir).name
                 try:
-                    payload["run"] = load_paper_trade_detail(run_id)
+                    payload["run"] = load_paper_trade_detail(run_id, results_root=paths.paper_runs_root)
                 except FileNotFoundError:
                     pass
             self._send_json(payload)
@@ -3104,14 +4170,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 result_dir = job.get("result_dir", "")
                 run_id = Path(result_dir).name
                 try:
-                    payload["run"] = load_simulation_detail(run_id)
+                    payload["run"] = load_simulation_detail(run_id, results_root=paths.simulation_runs_root)
                 except FileNotFoundError:
                     pass
             if job.get("status") == "completed" and job.get("type") == "simulation_plan":
                 result_dir = job.get("result_dir", "")
                 plan_id = Path(result_dir).name
                 try:
-                    payload["plan"] = load_simulation_plan_detail(plan_id)
+                    payload["plan"] = load_simulation_plan_detail(plan_id, results_root=paths.simulation_plans_root)
                 except FileNotFoundError:
                     pass
             self._send_json(payload)
@@ -3120,8 +4186,30 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/research/jobs":
+            body = self._read_json_body()
+            workspace = self._read_workspace_from_body(body)
+            config_path = str(body.get("config_path", "")).strip()
+            config_text = str(body.get("config_text", ""))
+            backend = str(body.get("backend", "native")).strip()
+            if not config_path:
+                self._send_json({"error": "missing_required_fields"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                job = self.app.submit_research_config_run(
+                    config_path=config_path,
+                    config_text=config_text,
+                    backend=backend,
+                    workspace=workspace,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json({"job": job}, status=HTTPStatus.ACCEPTED)
+            return
         if parsed.path == "/api/simulation/plans":
             body = self._read_json_body()
+            workspace = self._read_workspace_from_body(body)
             config_path = str(body.get("config_path", "")).strip()
             signal_date = str(body.get("signal_date", "")).strip() or str(body.get("trade_date", "")).strip()
             label = str(body.get("label", "")).strip()
@@ -3135,6 +4223,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     signal_date=signal_date,
                     initial_cash=initial_cash,
                     label=label,
+                    workspace=workspace,
                 )
             except (FileNotFoundError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -3143,25 +4232,28 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/simulation/plans/") and parsed.path.endswith("/execute"):
             body = self._read_json_body()
+            workspace = self._read_workspace_from_body(body)
             plan_id = Path(parsed.path.split("/api/simulation/plans/", 1)[1].rsplit("/execute", 1)[0]).name
             label = str(body.get("label", "")).strip()
             if not plan_id:
                 self._send_json({"error": "missing_required_fields"}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                job = self.app.submit_simulation_execute_plan(plan_id=plan_id, label=label)
+                job = self.app.submit_simulation_execute_plan(plan_id=plan_id, label=label, workspace=workspace)
             except (FileNotFoundError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             self._send_json({"job": job}, status=HTTPStatus.ACCEPTED)
             return
         if parsed.path.startswith("/api/simulation/plans/") and parsed.path.endswith("/next"):
+            body = self._read_json_body()
+            workspace = self._read_workspace_from_body(body)
             plan_id = Path(parsed.path.split("/api/simulation/plans/", 1)[1].rsplit("/next", 1)[0]).name
             if not plan_id:
                 self._send_json({"error": "missing_required_fields"}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                job = self.app.submit_simulation_next_plan(plan_id=plan_id)
+                job = self.app.submit_simulation_next_plan(plan_id=plan_id, workspace=workspace)
             except (FileNotFoundError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -3169,6 +4261,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/simulation/fill-scores":
             body = self._read_json_body()
+            workspace = self._read_workspace_from_body(body)
             config_path = str(body.get("config_path", "")).strip()
             trade_date = str(body.get("trade_date", "")).strip()
             scores_path = str(body.get("scores_path", "")).strip()
@@ -3180,6 +4273,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     config_path=config_path,
                     trade_date=trade_date,
                     scores_path=scores_path,
+                    workspace=workspace,
                 )
             except (FileNotFoundError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -3188,6 +4282,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/paper/generate":
             body = self._read_json_body()
+            workspace = self._read_workspace_from_body(body)
             config_path = str(body.get("config_path", "")).strip()
             trade_date = str(body.get("trade_date", "")).strip()
             label = str(body.get("label", "")).strip()
@@ -3203,6 +4298,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     initial_cash=initial_cash,
                     label=label,
                     scores_path=scores_path,
+                    workspace=workspace,
                 )
             except FileNotFoundError as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -3211,6 +4307,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/paper/fill-scores":
             body = self._read_json_body()
+            workspace = self._read_workspace_from_body(body)
             config_path = str(body.get("config_path", "")).strip()
             trade_date = str(body.get("trade_date", "")).strip()
             scores_path = str(body.get("scores_path", "")).strip()
@@ -3222,6 +4319,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     config_path=config_path,
                     trade_date=trade_date,
                     scores_path=scores_path,
+                    workspace=workspace,
                 )
             except (FileNotFoundError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -3232,6 +4330,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
             return
         body = self._read_json_body()
+        workspace = self._read_workspace_from_body(body)
         config_path = str(body.get("config_path", "")).strip()
         start_date = str(body.get("start_date", "")).strip()
         end_date = str(body.get("end_date", "")).strip()
@@ -3249,6 +4348,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 initial_cash=initial_cash,
                 label=label,
                 scores_path=scores_path,
+                workspace=workspace,
             )
         except FileNotFoundError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -3264,6 +4364,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
+
+    def _read_workspace_from_query(self, query: dict[str, list[str]]) -> str:
+        return normalize_workspace(str(query.get("workspace", ["native"])[0]).strip() or "native")
+
+    def _read_workspace_from_body(self, body: dict[str, Any]) -> str:
+        return normalize_workspace(str(body.get("workspace", "native")).strip() or "native")
 
     def _serve_file(self, path: Path, content_type: str) -> None:
         if not path.exists() or not path.is_file():
@@ -3285,7 +4391,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
-def create_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
+def create_server(host: str = "127.0.0.1", port: int = 8888) -> ThreadingHTTPServer:
     app = BacktestWebApp()
     server = ThreadingHTTPServer((host, port), RequestHandler)
     server.app = app  # type: ignore[attr-defined]
@@ -3294,7 +4400,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPSer
 
 def main() -> None:
     host = os.environ.get("ASHARE_WEB_HOST", "127.0.0.1")
-    port = int(os.environ.get("ASHARE_WEB_PORT", "8765"))
+    port = int(os.environ.get("ASHARE_WEB_PORT", "8888"))
     log_path = configure_file_logging(level=logging.INFO)
     server = create_server(host=host, port=port)
     print(f"ASHARE_WEB http://{host}:{port}")

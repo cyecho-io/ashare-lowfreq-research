@@ -6,9 +6,11 @@ from ashare_backtest.cli.research_config import (
     load_research_config,
     resolve_dated_output_path,
     resolve_research_config_path,
+    resolve_research_run_output_paths,
 )
 from ashare_backtest.factors import FactorBuildConfig, FactorBuilder
 from ashare_backtest.research import (
+    DEFAULT_FEATURE_COLUMNS,
     LayeredAnalysisConfig,
     PremarketReferenceConfig,
     StartDateRobustnessConfig,
@@ -20,38 +22,119 @@ from ashare_backtest.research import (
 )
 
 
-def run_research_pipeline(config_path: str) -> None:
+def run_research_pipeline(config_path: str, output_dir: str | Path | None = None) -> dict[str, object]:
     config = load_research_config(config_path)
+    resolved_config_path = Path(config_path).resolve()
+    resolved_output_paths = (
+        resolve_research_run_output_paths(config, output_dir) if output_dir is not None else None
+    )
+    factor_snapshot_path = (
+        resolved_output_paths.factor_snapshot_path if resolved_output_paths is not None else config.factor_snapshot_path
+    )
+    score_output_path = (
+        resolved_output_paths.score_output_path if resolved_output_paths is not None else config.score_output_path
+    )
+    metric_output_path = (
+        resolved_output_paths.metric_output_path if resolved_output_paths is not None else config.metric_output_path
+    )
+    layer_output_path = (
+        resolved_output_paths.layer_output_path if resolved_output_paths is not None else config.layer_output_path
+    )
+
+    print(
+        "RESEARCH_PIPELINE "
+        f"config={resolved_config_path.as_posix()} "
+        f"factor_spec_id={config.factor_spec_id} "
+        f"test_start_month={config.test_start_month} "
+        f"test_end_month={config.test_end_month}"
+    )
+    print(
+        "RESEARCH_STEP "
+        f"name=build_factors "
+        f"output={factor_snapshot_path}"
+    )
 
     FactorBuilder(
         FactorBuildConfig(
             storage_root=config.storage_root,
-            output_path=config.factor_snapshot_path,
+            output_path=factor_snapshot_path,
             universe_name=config.factor_universe_name,
             start_date=config.factor_start_date,
             as_of_date=config.factor_as_of_date,
         )
     ).build()
+    print(
+        "RESEARCH_STEP_DONE "
+        f"name=build_factors "
+        f"output={factor_snapshot_path}"
+    )
 
-    train_lightgbm_walk_forward(
+    print(
+        "RESEARCH_STEP "
+        f"name=train_walk_forward "
+        f"factor_panel={factor_snapshot_path} "
+        f"scores={score_output_path} "
+        f"metrics={metric_output_path}"
+    )
+
+    training_metrics = train_lightgbm_walk_forward(
         WalkForwardConfig(
-            factor_panel_path=config.factor_snapshot_path,
-            output_scores_path=config.score_output_path,
-            output_metrics_path=config.metric_output_path,
+            factor_panel_path=factor_snapshot_path,
+            output_scores_path=score_output_path,
+            output_metrics_path=metric_output_path,
             label_column=config.label_column,
+            feature_columns=config.feature_columns or tuple(DEFAULT_FEATURE_COLUMNS),
             train_window_months=config.train_window_months,
+            validation_window_months=config.validation_window_months,
             test_start_month=config.test_start_month,
             test_end_month=config.test_end_month,
         )
     )
+    print(
+        "RESEARCH_STEP_DONE "
+        f"name=train_walk_forward "
+        f"windows={training_metrics['window_count']} "
+        f"mean_spearman_ic={training_metrics['mean_spearman_ic']:.6f} "
+        f"scores={score_output_path}"
+    )
 
-    analyze_score_layers(
+    print(
+        "RESEARCH_STEP "
+        f"name=analyze_score_layers "
+        f"scores={score_output_path} "
+        f"output={layer_output_path}"
+    )
+    layer_payload = analyze_score_layers(
         LayeredAnalysisConfig(
-            scores_path=config.score_output_path,
-            output_path=config.layer_output_path,
+            scores_path=score_output_path,
+            output_path=layer_output_path,
             bins=5,
         )
     )
+    layer_summary = dict(layer_payload.get("summary", {}))
+    print(
+        "RESEARCH_STEP_DONE "
+        f"name=analyze_score_layers "
+        f"rows={layer_summary.get('rows', 0)} "
+        f"mean_top_bottom_spread={float(layer_summary.get('mean_top_bottom_spread', 0.0)):.6f} "
+        f"output={layer_output_path}"
+    )
+    return {
+        "backend": "native",
+        "model": "lgbm",
+        "config_id": config.factor_spec_id,
+        "config_path": resolved_config_path.as_posix(),
+        "factor_path": factor_snapshot_path,
+        "scores_path": score_output_path,
+        "metrics_path": metric_output_path,
+        "layer_output_path": layer_output_path,
+        "configured_factor_path": config.factor_snapshot_path,
+        "configured_scores_path": config.score_output_path,
+        "configured_metrics_path": config.metric_output_path,
+        "configured_layer_output_path": config.layer_output_path,
+        "training_metrics": training_metrics,
+        "layer_summary": layer_summary,
+    }
 
 
 def resolve_month_range_output_path(base_path: str | Path, test_start_month: str, test_end_month: str) -> str:

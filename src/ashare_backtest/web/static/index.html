@@ -11,7 +11,15 @@
       <nav class="topnav" aria-label="Global">
         <a class="topnav-link" href="/">数据看板</a>
         <a class="topnav-link active" href="/backtest">回测控制台</a>
+        <a class="topnav-link" href="/research">模型研究台</a>
         <a class="topnav-link" href="/simulation">模拟成交台</a>
+        <label class="workspace-switch">
+          <span>工作区</span>
+          <select data-workspace-switch>
+            <option value="native">native</option>
+            <option value="qlib">qlib</option>
+          </select>
+        </label>
       </nav>
 
       <header class="hero">
@@ -21,7 +29,7 @@
           <p class="subcopy">选策略、改区间、点一次开始回测，然后直接看结果和买卖明细。</p>
         </div>
         <div class="hero-meta">
-          <span class="pill">模型策略 UI</span>
+          <span class="pill">Workspace: <strong data-workspace-label>native</strong></span>
           <span class="pill">本地运行</span>
           <span class="pill">无额外前端依赖</span>
         </div>
@@ -124,6 +132,7 @@
       </main>
     </div>
 
+    <script src="/static/workspace.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

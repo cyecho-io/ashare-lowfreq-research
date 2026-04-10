@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Research Config Console</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <nav class="topnav" aria-label="Global">
+        <a class="topnav-link" href="/">数据看板</a>
+        <a class="topnav-link" href="/backtest">回测控制台</a>
+        <a class="topnav-link active" href="/research">模型研究台</a>
+        <a class="topnav-link" href="/simulation">模拟成交台</a>
+        <label class="workspace-switch">
+          <span>工作区</span>
+          <select data-workspace-switch>
+            <option value="native">native</option>
+            <option value="qlib">qlib</option>
+          </select>
+        </label>
+      </nav>
+
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Research Config Console</p>
+          <h1>研究配置执行台</h1>
+          <p class="subcopy">直接编辑 `configs/*.toml` 内容并运行完整研究流水线，页面会展示执行日志、产物路径和关键指标。</p>
+        </div>
+        <div class="hero-meta">
+          <span class="pill">Workspace: <strong data-workspace-label>native</strong></span>
+          <span class="pill">完整研究流水线</span>
+          <span class="pill">执行日志可见</span>
+        </div>
+      </header>
+
+      <main class="grid research-grid">
+        <!-- 可折叠的配置编辑面板 -->
+        <section class="panel control-panel" id="research-config-panel">
+          <div class="panel-head collapsible-header" id="research-config-header">
+            <div>
+              <h2>配置编辑</h2>
+              <p>选择研究配置并编辑 TOML 参数，运行时使用本页内容。</p>
+            </div>
+            <button type="button" class="collapse-toggle" id="research-config-toggle" aria-expanded="true">
+              <span class="collapse-icon">▼</span>
+            </button>
+          </div>
+          <div class="collapsible-body" id="research-config-body">
+            <form id="research-form" class="form-stack research-form-compact">
+              <div class="research-form-top">
+                <label class="config-select-label">
+                  <span>策略配置</span>
+                  <select id="research-config-select" name="config_path" required></select>
+                </label>
+                <div class="paper-action-row research-actions">
+                  <button id="research-reset-button" class="secondary-button" type="button">恢复原始配置</button>
+                  <button id="research-run-button" class="primary-button" type="submit">运行研究流程</button>
+                </div>
+              </div>
+              <div class="code-shell editor-shell">
+                <div class="code-shell-topbar">
+                  <div class="code-shell-dots" aria-hidden="true">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+                  <div class="code-shell-meta">
+                    <strong>TOML 配置</strong>
+                    <span id="research-config-filename">configs/*.toml</span>
+                  </div>
+                  <span class="code-shell-badge">toml</span>
+                </div>
+                <label class="code-shell-body">
+                  <span class="shell-accessible-label">TOML 内容</span>
+                  <textarea
+                    id="research-config-editor"
+                    class="code-editor"
+                    name="config_text"
+                    rows="16"
+                    spellcheck="false"
+                  ></textarea>
+                </label>
+              </div>
+            </form>
+            <div id="research-job-status" class="job-status muted">等待提交研究任务。</div>
+          </div>
+        </section>
+
+        <!-- 核心区域：记录列表 + 运行摘要 -->
+        <section class="panel records-panel">
+          <div class="panel-head">
+            <h2>最近研究记录</h2>
+            <p>每次运行都会保存配置快照和日志，点击记录查看详情。</p>
+          </div>
+          <div id="research-runs-list" class="run-list"></div>
+        </section>
+
+        <section class="panel summary-panel">
+          <div class="panel-head">
+            <h2>运行摘要</h2>
+            <p id="research-result-title">选择左侧记录查看运行结果。</p>
+          </div>
+          <div id="research-summary-cards" class="summary-cards research-summary-grid"></div>
+          <div class="state-panel action-panel">
+            <div class="state-head">
+              <h3>产物与配置快照</h3>
+            </div>
+            <div id="research-detail-list" class="detail-list"></div>
+          </div>
+          <div class="paper-action-row research-backtest-row">
+            <a id="research-open-backtest" class="pill link-pill" href="/backtest">带这份 scores 去回测 →</a>
+          </div>
+        </section>
+
+        <!-- 日志输出：运行时动态显示 -->
+        <section class="panel runs-panel" id="research-log-panel" style="display: none;">
+          <div class="panel-head">
+            <h2>执行日志</h2>
+            <p id="research-log-status">正在执行研究流程...</p>
+          </div>
+          <div class="code-shell terminal-shell">
+            <div class="code-shell-topbar">
+              <div class="code-shell-dots" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+              <div class="code-shell-meta">
+                <strong>bash 输出</strong>
+                <span id="research-log-hint">run-research-config pipeline</span>
+              </div>
+              <span class="code-shell-badge">bash</span>
+            </div>
+            <pre
+              id="research-log-stream"
+              class="terminal-output"
+              aria-live="polite"
+            >等待任务开始...</pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/workspace.js"></script>
+    <script src="/static/research.js"></script>
+  </body>
+</html>

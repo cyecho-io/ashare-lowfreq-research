@@ -26,3 +26,6 @@ storage/source/
 
 # Keep repository docs under storage/
 !storage/README.md
+AGENTS.md
+tests
+src/ashare_backtest.egg-info

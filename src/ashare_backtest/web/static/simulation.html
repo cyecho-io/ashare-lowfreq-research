@@ -11,7 +11,15 @@
       <nav class="topnav" aria-label="Global">
         <a class="topnav-link" href="/">数据看板</a>
         <a class="topnav-link" href="/backtest">回测控制台</a>
+        <a class="topnav-link" href="/research">模型研究台</a>
         <a class="topnav-link active" href="/simulation">模拟成交台</a>
+        <label class="workspace-switch">
+          <span>工作区</span>
+          <select data-workspace-switch>
+            <option value="native">native</option>
+            <option value="qlib">qlib</option>
+          </select>
+        </label>
       </nav>
 
       <header class="hero">
@@ -21,6 +29,7 @@
           <p class="subcopy">顶部用于创建新模拟账户；进入账户详情后，再按账户历史顺序滚动生成后续盘前计划和模拟下单。</p>
         </div>
         <div class="hero-meta">
+          <span class="pill">Workspace: <strong data-workspace-label>native</strong></span>
           <a class="pill link-pill" href="/backtest">回测控制台</a>
           <span class="pill">模拟账户</span>
         </div>
@@ -173,6 +182,7 @@
       </main>
     </div>
 
+    <script src="/static/workspace.js"></script>
     <script src="/static/simulation.js"></script>
   </body>
 </html>
