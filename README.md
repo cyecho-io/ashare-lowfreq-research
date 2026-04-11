@@ -44,6 +44,33 @@
 
 `results/`、`research/factors/`、`research/models/` 下的产物默认视为本地生成文件，已经加入 `.gitignore`，不再作为仓库源码的一部分长期追踪。
 
+## 页面截图
+
+<details>
+  <summary>首页</summary>
+
+  ![首页](docs/images/homepage.jpeg)
+</details>
+
+<details>
+  <summary>模型研究台</summary>
+
+  ![模型研究台](docs/images/research_run_page.png)
+</details>
+
+<details>
+  <summary>回测控制台</summary>
+
+  ![回测控制台](docs/images/qlib_back_test.png)
+</details>
+
+<details>
+  <summary>模拟成交台</summary>
+
+  ![模拟成交台](docs/images/simulation_page.png)
+</details>
+
+
 ## 安装
 
 需要 Python 3.11+。
