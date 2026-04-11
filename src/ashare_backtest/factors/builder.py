@@ -33,7 +33,7 @@ class FactorBuildConfig:
 
 
 class FactorBuilder:
-    BARS_COLUMNS = ["symbol", "trade_date", "high", "low", "close", "volume", "amount"]
+    BARS_COLUMNS = ["symbol", "trade_date", "high", "low", "close", "volume", "amount", "is_suspended"]
     INSTRUMENT_COLUMNS = ["symbol", "industry_level_1"]
 
     def __init__(self, config: FactorBuildConfig) -> None:
