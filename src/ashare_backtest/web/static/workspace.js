@@ -1,5 +1,5 @@
 const WORKSPACE_STORAGE_KEY = "ashare-backtest-workspace";
-const DEFAULT_WORKSPACE = "native";
+const DEFAULT_WORKSPACE = "qlib";
 const SUPPORTED_WORKSPACES = new Set(["native", "qlib"]);
 
 function normalizeWorkspace(workspace) {
