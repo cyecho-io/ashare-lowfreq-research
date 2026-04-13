@@ -2665,6 +2665,8 @@ def _run_qlib_research_pipeline(config_path: str, output_dir: str | Path | None 
     market = str(qlib_section.get("market") or "csi300")
     model_name = str(qlib_section.get("model_name") or "lgbm")
     config_id = str(qlib_section.get("config_id") or config.factor_spec_id)
+    label_mode = str(qlib_section.get("label_mode") or "raw_fwd_return_5")
+    label_expression = str(qlib_section.get("label_expression") or "Ref($close, -5) / Ref($close, -1) - 1")
     feature_specs = _resolve_qlib_feature_specs(qlib_section)
 
     print(
@@ -2691,6 +2693,8 @@ def _run_qlib_research_pipeline(config_path: str, output_dir: str | Path | None 
             market=market,
             config_id=config_id,
             model_name=model_name,
+            label_mode=label_mode,
+            label_expression=label_expression,
             feature_specs=feature_specs,
             train_window_months=config.train_window_months,
             validation_window_months=config.validation_window_months,

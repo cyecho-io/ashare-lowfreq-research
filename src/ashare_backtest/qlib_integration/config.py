@@ -22,6 +22,7 @@ DEFAULT_QLIB_FEATURES: tuple[QlibFeatureSpec, ...] = (
 )
 
 DEFAULT_QLIB_LABEL_EXPRESSION = "Ref($close, -5) / Ref($close, -1) - 1"
+DEFAULT_QLIB_LABEL_MODE = "raw_fwd_return_5"
 
 
 def select_qlib_feature_specs(feature_columns: tuple[str, ...] | list[str] | None) -> tuple[QlibFeatureSpec, ...]:
@@ -87,6 +88,7 @@ class QlibBaseConfig:
     freq: str = "day"
     config_id: str = "qlib_default"
     model_name: str = "lgbm"
+    label_mode: str = DEFAULT_QLIB_LABEL_MODE
     label_expression: str = DEFAULT_QLIB_LABEL_EXPRESSION
     feature_specs: tuple[QlibFeatureSpec, ...] = DEFAULT_QLIB_FEATURES
 

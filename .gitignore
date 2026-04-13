@@ -11,6 +11,7 @@ htmlcov/
 .env.*
 
 strategies/registry.json
+strategies/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]_*.py
 results/
 
 # Generated research artifacts
@@ -18,6 +19,8 @@ research/factors/
 research/models/
 !research/demo/
 !research/demo/**
+research/native/
+research/qlib/
 
 # Local market data snapshots
 storage/catalog.json
@@ -29,3 +32,4 @@ storage/source/
 AGENTS.md
 tests
 src/ashare_backtest.egg-info
+docs/archive

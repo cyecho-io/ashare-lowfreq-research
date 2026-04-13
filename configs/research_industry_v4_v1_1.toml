@@ -10,12 +10,12 @@ start_date = "2024-01-02"
 as_of_date = "2026-03-27"
 
 [factors]
-output_path = "research/factors/research_industry_v4_v1_1/tradable_core/start_2024-01-02/asof_2026-03-10.parquet"
+output_path = "research/factors/research_industry_v4_v1_1/tradable_core/start_2024-01-02/asof_2026-03-27.parquet"
 
 [training]
 label_column = "industry_excess_fwd_return_5"
 train_window_months = 12
-test_start_month = "2024-02"
+test_start_month = "2025-01"
 test_end_month = "2026-02"
 score_output_path = "research/models/walk_forward_scores_industry_v4_v1_1.parquet"
 metric_output_path = "research/models/walk_forward_metrics_industry_v4_v1_1.json"
@@ -32,7 +32,7 @@ config_id = "research_industry_v4_v1_1_qlib"
 
 [model_backtest]
 output_dir = "results/model_score_backtest_walk_forward_industry_v4_v1_1"
-start_date = "2024-01-03"
+start_date = "2025-01-03"
 end_date = "2026-03-27"
 top_k = 6
 rebalance_every = 5
