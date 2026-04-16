@@ -10,8 +10,8 @@
     <div class="shell">
       <nav class="topnav" aria-label="Global">
         <a class="topnav-link" href="/">数据看板</a>
-        <a class="topnav-link" href="/backtest">回测控制台</a>
         <a class="topnav-link active" href="/research">模型研究台</a>
+        <a class="topnav-link" href="/backtest">回测控制台</a>
         <a class="topnav-link" href="/simulation">模拟成交台</a>
         <label class="workspace-switch">
           <span>工作区</span>
@@ -26,7 +26,7 @@
         <div>
           <p class="eyebrow">Research Config Console</p>
           <h1>研究配置执行台</h1>
-          <p class="subcopy">直接编辑 `configs/*.toml` 内容并运行完整研究流水线，页面会展示执行日志、产物路径和关键指标。</p>
+          <p class="subcopy">直接编辑 `configs/**/*.toml` 内容并运行完整研究流水线，页面会展示执行日志、产物路径和关键指标。</p>
         </div>
         <div class="hero-meta">
           <span class="pill">Workspace: <strong data-workspace-label>qlib</strong></span>
@@ -68,7 +68,7 @@
                   </div>
                   <div class="code-shell-meta">
                     <strong>TOML 配置</strong>
-                    <span id="research-config-filename">configs/*.toml</span>
+                    <span id="research-config-filename">configs/**/*.toml</span>
                   </div>
                   <span class="code-shell-badge">toml</span>
                 </div>

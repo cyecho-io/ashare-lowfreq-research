@@ -10,8 +10,8 @@
     <div class="shell">
       <nav class="topnav" aria-label="Global">
         <a class="topnav-link" href="/">数据看板</a>
-        <a class="topnav-link active" href="/backtest">回测控制台</a>
         <a class="topnav-link" href="/research">模型研究台</a>
+        <a class="topnav-link active" href="/backtest">回测控制台</a>
         <a class="topnav-link" href="/simulation">模拟成交台</a>
         <label class="workspace-switch">
           <span>工作区</span>
@@ -26,7 +26,7 @@
         <div>
           <p class="eyebrow">A-Share Backtest Console</p>
           <h1>策略回测控制台</h1>
-          <p class="subcopy">选策略、改区间、点一次开始回测，然后直接看结果和买卖明细。</p>
+          <p class="subcopy">选分数文件、改区间、点一次开始回测，然后直接看结果和买卖明细。</p>
         </div>
         <div class="hero-meta">
           <span class="pill">Workspace: <strong data-workspace-label>qlib</strong></span>
@@ -39,17 +39,17 @@
         <section class="panel control-panel">
           <div class="panel-head">
             <h2>开始回测</h2>
-            <p>先从 `configs/*.toml` 里选一个策略配置。</p>
+            <p>先选分数文件，系统会自动关联对应策略配置。</p>
           </div>
           <form id="run-form" class="form-stack">
-            <label>
-              <span>策略配置</span>
-              <select id="strategy-select" name="config_path" required></select>
-            </label>
             <label class="score-file-field">
               <span>分数文件 Parquet</span>
               <select id="score-file-select" name="scores_path" required></select>
             </label>
+            <div class="readonly-field">
+              <span>关联策略配置</span>
+              <strong id="strategy-config-display">-</strong>
+            </div>
             <div class="form-row">
               <label>
                 <span>开始日期</span>

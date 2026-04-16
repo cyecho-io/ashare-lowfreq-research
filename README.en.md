@@ -2,6 +2,8 @@
 
 [中文说明](README.md)
 
+Full usage guide: [Documentation](https://cyecho-io.github.io/ashare-lowfreq-research/).
+
 This repository is a personal A-share research and backtesting toolkit focused on a narrow, maintainable workflow:
 
 - sync and standardize local A-share market data
@@ -76,7 +78,7 @@ source .venv/bin/activate
 Run the demo research preset:
 
 ```bash
-ashare-backtest run-research-config configs/demo_research.toml
+ashare-backtest run-research-config configs/qlib/demo_strategy.toml
 ```
 
 Start the local web console:
@@ -89,15 +91,15 @@ Then open `http://127.0.0.1:8888`.
 
 What this demo gives you:
 
-- a tracked tiny A-share sample dataset
-- one runnable research preset
+- a tracked tiny A-share sample dataset with project parquet data and a small qlib provider
+- runnable native / qlib demo research presets
 - one end-to-end example that generates factors, model scores, and backtest outputs locally
 - generated backtest outputs under `results/demo_backtest`
 - a local web UI for dashboard, backtest artifacts, and simulation views
 
-Before opening `/backtest`, run `ashare-backtest run-research-config configs/demo_research.toml` once so the demo score file is generated locally.
+Before opening `/backtest`, run `ashare-backtest run-research-config configs/qlib/demo_strategy.toml` once so the demo score file is generated locally.
 
-If you want to switch from demo data to your own local dataset later, update the storage root in your config and use the full workflow below.
+If you want to switch from demo data to your own local dataset later, update `[storage].root` in your config. For qlib workflows, also update `[qlib].provider_uri` and `[qlib].market`. See [real data setup](https://cyecho-io.github.io/ashare-lowfreq-research/real-data/).
 
 ## Quick Start
 
@@ -175,19 +177,13 @@ ashare-backtest build-factors \
 Run a configured research pipeline:
 
 ```bash
-ashare-backtest run-research-config configs/research_industry_v4_v1_1.toml
-```
-
-Use the template config as a starting point for new presets:
-
-```bash
-cp examples/demo_research_config.toml configs/demo_research.toml
+ashare-backtest run-research-config configs/qlib/research_industry_v4_v1_1_qlib.toml
 ```
 
 Run the tracked demo preset against the bundled tiny dataset:
 
 ```bash
-ashare-backtest run-research-config configs/demo_research.toml
+ashare-backtest run-research-config configs/qlib/demo_strategy.toml
 ```
 
 Run a backtest from exported model scores:
@@ -246,7 +242,7 @@ The console provides:
 
 ## Recommended Research Preset
 
-The current recommended preset is centered on [`configs/research_industry_v4_v1_1.toml`](/Users/yongqiuwu/works/github/Trade/configs/research_industry_v4_v1_1.toml):
+The current recommended preset is centered on [`configs/qlib/research_industry_v4_v1_1_qlib.toml`](/Users/yongqiuwu/works/github/Trade/configs/qlib/research_industry_v4_v1_1_qlib.toml):
 
 - factor panel: `industry_v4`
 - label: `industry_excess_fwd_return_5`

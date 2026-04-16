@@ -377,9 +377,20 @@ def _append_simulation_account_event(account_id: str, payload: dict[str, Any], r
 
 def _display_path(path: Path) -> str:
     try:
-        return path.relative_to(REPO_ROOT).as_posix()
+        return path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
     except ValueError:
-        return path.as_posix()
+        try:
+            return path.resolve().relative_to(Path.home()).as_posix().replace("./", "")
+        except ValueError:
+            return path.as_posix()
+
+
+def _display_path_text(path_text: str) -> str:
+    normalized = str(path_text or "").strip()
+    if not normalized:
+        return ""
+    path = Path(normalized)
+    return _display_path(path if path.is_absolute() else REPO_ROOT / path)
 
 
 def _sync_simulation_account_files(
@@ -873,6 +884,77 @@ def _score_file_payload_for_presets(
         manifest_path=manifest_path,
         workspace=workspace,
     )
+
+
+def _attach_score_config_paths(
+    score_files: list[dict[str, Any]],
+    presets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_score_path = {
+        str(preset.get("score_output_path") or ""): str(preset.get("config_path") or "")
+        for preset in presets
+        if str(preset.get("score_output_path") or "").strip()
+    }
+    by_factor_spec_id = {
+        str(preset.get("factor_spec_id") or ""): str(preset.get("config_path") or "")
+        for preset in presets
+        if str(preset.get("factor_spec_id") or "").strip()
+    }
+    by_config_id = {
+        str(preset.get("id") or ""): str(preset.get("config_path") or "")
+        for preset in presets
+        if str(preset.get("id") or "").strip()
+    }
+
+    enriched: list[dict[str, Any]] = []
+    for item in score_files:
+        next_item = dict(item)
+        config_path = str(next_item.get("config_path") or "").strip()
+        if not config_path:
+            config_path = by_score_path.get(str(next_item.get("path") or "").strip(), "")
+        if not config_path:
+            config_path = by_factor_spec_id.get(str(next_item.get("factor_spec_id") or "").strip(), "")
+        if not config_path:
+            config_path = by_config_id.get(str(next_item.get("config_id") or "").strip(), "")
+        next_item["config_path"] = config_path
+        enriched.append(next_item)
+    return enriched
+
+
+def _config_path_for_score_path(
+    scores_path: str,
+    *,
+    config_root: Path = CONFIG_ROOT,
+    workspace: str = "native",
+    models_root: Path = REPO_ROOT / "research" / "models",
+    research_runs_root: Path | None = None,
+    manifest_path: Path | None = None,
+    latest_root: Path | None = None,
+) -> str:
+    normalized = str(scores_path).strip()
+    if not normalized:
+        return ""
+    presets = list_strategy_presets(config_root=config_root, workspace=workspace, latest_root=latest_root)
+    preset_payloads = [preset.__dict__ for preset in presets]
+    score_files = _attach_score_config_paths(
+        _score_file_payload_for_presets(
+            presets,
+            include_single_day=False,
+            models_root=models_root,
+            research_runs_root=research_runs_root,
+            manifest_path=manifest_path,
+            workspace=workspace,
+        ),
+        preset_payloads,
+    )
+    candidates = {normalized}
+    resolved_scores_path = _resolve_repo_path(normalized).resolve()
+    candidates.add(resolved_scores_path.as_posix())
+    candidates.add(_display_path(resolved_scores_path))
+    for item in score_files:
+        if str(item.get("path") or "").strip() in candidates:
+            return str(item.get("config_path") or "").strip()
+    return ""
 
 
 def _resolve_selected_scores_path(
@@ -1703,6 +1785,8 @@ def _read_optional_json(path: Path) -> dict[str, Any]:
 def _build_research_run_payload(run_id: str, target: Path, meta: dict[str, Any]) -> dict[str, Any]:
     scores_path = str(meta.get("scores_path") or "").strip()
     metrics_path = str(meta.get("metrics_path") or "").strip()
+    display_scores_path = _display_path_text(scores_path)
+    display_metrics_path = _display_path_text(metrics_path)
     score_start_date = ""
     score_end_date = ""
     if scores_path:
@@ -1719,18 +1803,19 @@ def _build_research_run_payload(run_id: str, target: Path, meta: dict[str, Any])
         "id": run_id,
         "name": str(meta.get("name") or run_id),
         "result_dir": _display_path(target),
-        "config_path": str(meta.get("config_path") or meta.get("source_config_path") or ""),
-        "config_snapshot_path": str(meta.get("config_snapshot_path") or ""),
-        "logs_path": str(meta.get("logs_path") or ""),
+        "config_path": _display_path_text(str(meta.get("config_path") or meta.get("source_config_path") or "")),
+        "config_snapshot_path": _display_path_text(str(meta.get("config_snapshot_path") or "")),
+        "logs_path": _display_path_text(str(meta.get("logs_path") or "")),
         "factor_spec_id": str(meta.get("factor_spec_id") or ""),
         "mode": str(meta.get("mode") or "run_research_config"),
         "as_of_date": str(meta.get("as_of_date") or ""),
         "test_month": str(meta.get("test_month") or ""),
         "test_start_month": str(meta.get("test_start_month") or ""),
         "test_end_month": str(meta.get("test_end_month") or ""),
-        "factor_panel_path": str(meta.get("factor_panel_path") or ""),
-        "scores_path": scores_path,
-        "metrics_path": metrics_path,
+        "factor_panel_path": _display_path_text(str(meta.get("factor_panel_path") or "")),
+        "scores_path": display_scores_path,
+        "metrics_path": display_metrics_path,
+        "layer_output_path": _display_path_text(str(meta.get("layer_output_path") or "")),
         "backend": str(meta.get("backend") or provenance["backend"] or ""),
         "workspace": artifact_workspace,
         "model": str(meta.get("model") or provenance["model"] or ""),
@@ -2700,6 +2785,8 @@ def _run_qlib_research_pipeline(config_path: str, output_dir: str | Path | None 
             validation_window_months=config.validation_window_months,
             test_start_month=config.test_start_month,
             test_end_month=config.test_end_month,
+            data_start_date=config.factor_start_date,
+            data_end_date=config.factor_as_of_date,
             output_scores_path=score_output_path,
             output_metrics_path=metric_output_path,
         )
@@ -3469,6 +3556,11 @@ class BacktestWebApp:
                 else:
                     payload = run_research_pipeline(config_snapshot_path.as_posix(), output_dir=output_dir)
 
+            factor_panel_path = _display_path_text(str(payload.get("factor_path") or run_output_paths.factor_snapshot_path))
+            scores_path = _display_path_text(str(payload.get("scores_path") or run_output_paths.score_output_path))
+            metrics_path = _display_path_text(str(payload.get("metrics_path") or run_output_paths.metric_output_path))
+            layer_output_path = _display_path_text(str(payload.get("layer_output_path") or run_output_paths.layer_output_path))
+            model_backtest_output_dir = _display_path_text(run_output_paths.model_backtest_output_dir)
             meta_payload = {
                 "name": Path(config_path).stem.replace("_", " "),
                 "status": "completed",
@@ -3484,13 +3576,13 @@ class BacktestWebApp:
                 "factor_spec_id": config.factor_spec_id,
                 "test_start_month": config.test_start_month,
                 "test_end_month": config.test_end_month,
-                "factor_panel_path": str(payload.get("factor_path") or run_output_paths.factor_snapshot_path),
-                "scores_path": str(payload.get("scores_path") or run_output_paths.score_output_path),
-                "metrics_path": str(payload.get("metrics_path") or run_output_paths.metric_output_path),
-                "layer_output_path": str(payload.get("layer_output_path") or run_output_paths.layer_output_path),
+                "factor_panel_path": factor_panel_path,
+                "scores_path": scores_path,
+                "metrics_path": metrics_path,
+                "layer_output_path": layer_output_path,
                 "provider_uri": str(payload.get("provider_uri") or ""),
                 "market": str(payload.get("market") or ""),
-                "model_backtest_output_dir": run_output_paths.model_backtest_output_dir,
+                "model_backtest_output_dir": model_backtest_output_dir,
                 "configured_factor_panel_path": config.factor_snapshot_path,
                 "configured_scores_path": config.score_output_path,
                 "configured_metrics_path": config.metric_output_path,
@@ -3850,18 +3942,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                     latest_root=paths.research_models_root / "latest",
                 )
             ]
+            score_files = _score_file_payload_for_presets(
+                [StrategyPreset(**preset) for preset in presets],
+                include_single_day=False,
+                models_root=paths.research_models_root,
+                research_runs_root=paths.research_runs_root,
+                manifest_path=paths.score_manifest_path,
+                workspace=workspace,
+            )
             self._send_json(
                 {
                     "workspace": workspace,
                     "strategies": presets,
-                    "score_files": _score_file_payload_for_presets(
-                        [StrategyPreset(**preset) for preset in presets],
-                        include_single_day=False,
-                        models_root=paths.research_models_root,
-                        research_runs_root=paths.research_runs_root,
-                        manifest_path=paths.score_manifest_path,
-                        workspace=workspace,
-                    ),
+                    "score_files": _attach_score_config_paths(score_files, presets),
                 }
             )
             return
@@ -4341,6 +4434,19 @@ class RequestHandler(BaseHTTPRequestHandler):
         label = str(body.get("label", "")).strip()
         scores_path = str(body.get("scores_path", "")).strip()
         initial_cash = float(body.get("initial_cash", 1_000_000.0))
+        if not config_path and scores_path:
+            try:
+                config_path = _config_path_for_score_path(
+                    scores_path,
+                    config_root=paths.config_root,
+                    workspace=workspace,
+                    models_root=paths.research_models_root,
+                    research_runs_root=paths.research_runs_root,
+                    manifest_path=paths.score_manifest_path,
+                    latest_root=paths.research_models_root / "latest",
+                )
+            except Exception as exc:
+                LOGGER.warning("failed to derive config_path from scores_path=%s: %s", scores_path, exc)
         if not config_path or not start_date or not end_date:
             self._send_json({"error": "missing_required_fields"}, status=HTTPStatus.BAD_REQUEST)
             return

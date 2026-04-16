@@ -8,8 +8,8 @@ const state = {
 };
 
 const els = {
-  strategySelect: document.getElementById("strategy-select"),
   scoreFileSelect: document.getElementById("score-file-select"),
+  strategyConfigDisplay: document.getElementById("strategy-config-display"),
   startDate: document.getElementById("start-date"),
   endDate: document.getElementById("end-date"),
   initialCash: document.getElementById("initial-cash"),
@@ -61,8 +61,58 @@ function formatPercent(value) {
   return `${formatNumber((Number(value || 0) * 100), 2)}%`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;",
+  })[character]);
+}
+
+function presetForConfigPath(configPath) {
+  const normalized = String(configPath || "").trim();
+  return state.strategies.find((item) => item.config_path === normalized) || null;
+}
+
+function activeScoreFile() {
+  return state.scoreFiles.find((item) => item.path === els.scoreFileSelect.value) || null;
+}
+
 function activePreset() {
-  return state.strategies.find((item) => item.config_path === els.strategySelect.value) || null;
+  const selectedScore = activeScoreFile();
+  return presetForConfigPath(selectedScore?.config_path || "");
+}
+
+function scoreFileLabel(item) {
+  const backend = item.backend || item.workspace || "native";
+  const model = item.model ? `/${item.model}` : "";
+  const configId = item.config_id || item.factor_spec_id || "";
+  const range = item.start_date && item.end_date ? ` · ${item.start_date}~${item.end_date}` : "";
+  return `[${backend}${model}] ${configId ? `${configId} · ` : ""}${item.path}${range}`;
+}
+
+function renderScoreFileOptions(selectedPath = "") {
+  els.scoreFileSelect.innerHTML = "";
+  if (!state.scoreFiles.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "未找到 score parquet";
+    option.disabled = true;
+    option.selected = true;
+    els.scoreFileSelect.appendChild(option);
+    return;
+  }
+
+  for (const item of state.scoreFiles) {
+    const option = document.createElement("option");
+    option.value = item.path;
+    option.textContent = scoreFileLabel(item);
+    els.scoreFileSelect.appendChild(option);
+  }
+  const selectedExists = selectedPath && state.scoreFiles.some((item) => item.path === selectedPath);
+  els.scoreFileSelect.value = selectedExists ? selectedPath : state.scoreFiles[0].path;
 }
 
 function applyQueryPrefill() {
@@ -70,102 +120,58 @@ function applyQueryPrefill() {
   const configPath = params.get("config_path") || "";
   const scoresPath = params.get("scores_path") || "";
 
-  // 先设置策略配置
-  if (configPath && state.strategies.some((item) => item.config_path === configPath)) {
-    els.strategySelect.value = configPath;
+  let selectedPath = "";
+  if (scoresPath && state.scoreFiles.some((item) => item.path === scoresPath)) {
+    selectedPath = scoresPath;
   }
-
-  // 根据选中的策略更新分数文件列表
-  applyPresetDefaults();
-
-  // 再尝试设置分数文件（如果 URL 中指定了）
-  if (scoresPath) {
-    // 检查是否已在选项中
-    const optionExists = Array.from(els.scoreFileSelect.options).some((item) => item.value === scoresPath);
-    if (optionExists) {
-      els.scoreFileSelect.value = scoresPath;
-    } else {
-      // 如果不在选项中，先添加到列表（来自研究台的 scores 文件）
-      const scoreFile = state.scoreFiles.find((item) => item.path === scoresPath);
-      if (scoreFile) {
-        const option = document.createElement("option");
-        option.value = scoreFile.path;
-        option.textContent = scoreFile.path;
-        els.scoreFileSelect.appendChild(option);
-        els.scoreFileSelect.value = scoresPath;
-      }
-    }
-    applyScoreFileDates();
+  if (!selectedPath && configPath) {
+    selectedPath = state.scoreFiles.find((item) => item.config_path === configPath)?.path || "";
   }
-}
-
-function scoreFileOptionsForPreset(preset) {
-  if (!preset) return [];
-  const byPath = new Map(state.scoreFiles.map((item) => [item.path, item]));
-  const presetDefault = byPath.get(preset.score_output_path) || null;
-  const options = [];
-  if (presetDefault) {
-    options.push(presetDefault);
-  }
-  for (const item of state.scoreFiles) {
-    if (!presetDefault || item.path !== presetDefault.path) {
-      options.push(item);
-    }
-  }
-  return options;
-}
-
-function activeScoreFile() {
-  const fromPreset = scoreFileOptionsForPreset(activePreset()).find((item) => item.path === els.scoreFileSelect.value);
-  if (fromPreset) return fromPreset;
-  // 如果不在 preset 选项中，从全局 scoreFiles 查找
-  return state.scoreFiles.find((item) => item.path === els.scoreFileSelect.value) || null;
+  renderScoreFileOptions(selectedPath);
+  applyScoreFileDates();
 }
 
 function renderPresetMeta() {
+  const selectedScore = activeScoreFile();
   const preset = activePreset();
-  if (!preset) {
-    els.presetMeta.textContent = "未找到策略配置。";
+  const configPath = selectedScore?.config_path || "";
+  els.strategyConfigDisplay.textContent = configPath || "未能自动关联";
+  if (!selectedScore) {
+    els.presetMeta.textContent = "未找到可用于回测的分数文件。";
     return;
   }
-  const selectedScore = activeScoreFile();
-  const selectedPath = els.scoreFileSelect.value || "-";
-  els.presetMeta.innerHTML = [
-    `当前选择分数文件: <strong>${selectedPath}</strong>`,
-    `当前研究后端: <strong>${selectedScore?.backend || "-"}</strong> / 模型 <strong>${selectedScore?.model || "-"}</strong>`,
-    `当前分数区间: <strong>${selectedScore?.start_date || "-"}</strong> 至 <strong>${selectedScore?.end_date || "-"}</strong>`,
-    `默认参数: top_k ${preset.top_k}, rebalance_every ${preset.rebalance_every}, min_hold_bars ${preset.min_hold_bars}`,
-  ].join("<br />");
-}
-
-function applyPresetDefaults() {
-  const preset = activePreset();
-  if (!preset) return;
-  const availableScoreFiles = scoreFileOptionsForPreset(preset);
-  const selectedScore = availableScoreFiles[0] || null;
-  els.scoreFileSelect.innerHTML = availableScoreFiles
-    .map((item) => `<option value="${item.path}">[${item.backend || "native"}] ${item.path}</option>`)
-    .join("");
-  if (selectedScore?.path) {
-    els.scoreFileSelect.value = selectedScore.path;
+  const lines = [
+    `当前选择分数文件: <strong>${escapeHtml(selectedScore.path || "-")}</strong>`,
+    `关联策略配置: <strong>${escapeHtml(configPath || "未能自动关联")}</strong>`,
+    `当前研究后端: <strong>${escapeHtml(selectedScore.backend || "-")}</strong> / 模型 <strong>${escapeHtml(selectedScore.model || "-")}</strong>`,
+    `当前分数区间: <strong>${escapeHtml(selectedScore.start_date || "-")}</strong> 至 <strong>${escapeHtml(selectedScore.end_date || "-")}</strong>`,
+  ];
+  if (preset) {
+    lines.push(
+      `默认参数: top_k ${escapeHtml(preset.top_k)}, rebalance_every ${escapeHtml(preset.rebalance_every)}, min_hold_bars ${escapeHtml(preset.min_hold_bars)}`,
+    );
   } else {
-    els.scoreFileSelect.value = "";
+    lines.push("未自动匹配策略配置，不能直接提交回测。");
   }
-  els.startDate.value = selectedScore?.start_date || "";
-  els.endDate.value = selectedScore?.end_date || "";
-  els.initialCash.value = preset.initial_cash;
-  renderPresetMeta();
+  els.presetMeta.innerHTML = lines.join("<br />");
 }
 
 function applyScoreFileDates() {
   const preset = activePreset();
   const selectedScore = activeScoreFile();
-  if (!preset || !selectedScore) {
+  if (!selectedScore) {
+    els.startDate.value = "";
+    els.endDate.value = "";
     renderPresetMeta();
     return;
   }
-  els.startDate.value = selectedScore.start_date || preset.default_start_date;
-  els.endDate.value = selectedScore.end_date || preset.default_end_date;
+  els.startDate.value = selectedScore.start_date || preset?.default_start_date || "";
+  els.endDate.value = selectedScore.end_date || preset?.default_end_date || "";
+  if (preset?.initial_cash != null) {
+    els.initialCash.value = preset.initial_cash;
+  } else if (!els.initialCash.value) {
+    els.initialCash.value = 1000000;
+  }
   renderPresetMeta();
 }
 
@@ -301,10 +307,8 @@ async function loadStrategies() {
   const payload = await fetchJson(window.AshareWorkspace.withWorkspaceUrl("/api/strategies"));
   state.strategies = payload.strategies;
   state.scoreFiles = payload.score_files || [];
-  els.strategySelect.innerHTML = state.strategies
-    .map((strategy) => `<option value="${strategy.config_path}">${strategy.name}</option>`)
-    .join("");
-  applyPresetDefaults();
+  renderScoreFileOptions();
+  applyScoreFileDates();
 }
 
 async function loadRuns(selectFirst = true) {
@@ -330,9 +334,16 @@ async function submitRun(event) {
   event.preventDefault();
   els.runButton.disabled = true;
   els.jobStatus.textContent = "任务已提交，等待启动。";
+  const selectedScore = activeScoreFile();
+  const configPath = selectedScore?.config_path || "";
+  if (!selectedScore?.path || !configPath) {
+    els.jobStatus.textContent = "提交失败: 当前分数文件无法关联策略配置。请重新生成 score 或检查 config_id/factor_spec.id。";
+    els.runButton.disabled = false;
+    return;
+  }
   const body = {
-    config_path: els.strategySelect.value,
-    scores_path: els.scoreFileSelect.value,
+    config_path: configPath,
+    scores_path: selectedScore.path,
     start_date: els.startDate.value,
     end_date: els.endDate.value,
     initial_cash: Number(els.initialCash.value),
@@ -394,7 +405,6 @@ async function pollJob() {
 }
 
 function bindEvents() {
-  els.strategySelect.addEventListener("change", applyPresetDefaults);
   els.scoreFileSelect.addEventListener("change", applyScoreFileDates);
   els.runForm.addEventListener("submit", submitRun);
   els.tradeFilter.addEventListener("input", renderTrades);

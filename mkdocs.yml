@@ -1,0 +1,35 @@
+site_name: A Share Low Frequency Research
+site_description: Web-first guide for demo research, score backtests, and local A-share workflows.
+site_url: https://cyecho-io.github.io/ashare-lowfreq-research/
+repo_url: https://github.com/cyecho-io/ashare-lowfreq-research
+repo_name: cyecho-io/ashare-lowfreq-research
+docs_dir: docs-site
+site_dir: site
+
+theme:
+  name: material
+  language: zh
+  font: false
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+
+nav:
+  - 首页: index.md
+  - 快速体验: quickstart.md
+  - Web 控制台: web-console.md
+  - CLI 对照: cli-reference.md
+  - Demo 数据: demo-data.md
+  - 接入真实数据: real-data.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true

@@ -101,6 +101,8 @@ class QlibWalkForwardConfig(QlibBaseConfig):
     validation_window_months: int = 1
     test_start_month: str = "2025-07"
     test_end_month: str = "2026-02"
+    data_start_date: str | None = None
+    data_end_date: str | None = None
 
 
 @dataclass(frozen=True)

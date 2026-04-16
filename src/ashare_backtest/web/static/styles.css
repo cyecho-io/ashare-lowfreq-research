@@ -504,12 +504,12 @@ body[data-workspace="native"] .panel {
   min-width: 0;
 }
 
-.form-stack > label:first-child {
-  grid-column: 1 / 2;
+.form-stack > .score-file-field {
+  grid-column: 1 / 3;
 }
 
-.form-stack > .score-file-field {
-  grid-column: 2 / 5;
+.form-stack > .readonly-field {
+  grid-column: 3 / 5;
 }
 
 .form-stack > .form-row {
@@ -588,6 +588,39 @@ body[data-workspace="native"] input:focus,
 body[data-workspace="native"] select:focus,
 body[data-workspace="native"] button:focus {
   outline: 3px solid rgba(23, 54, 79, 0.14);
+}
+
+.readonly-field {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: var(--ink);
+}
+
+.readonly-field > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.readonly-field strong {
+  display: flex;
+  align-items: center;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+body[data-workspace="native"] .readonly-field strong {
+  background: rgba(255, 255, 255, 0.72);
+  color: #17364f;
 }
 
 .preset-meta {
@@ -1361,8 +1394,8 @@ tbody tr:nth-child(odd) {
     grid-template-columns: minmax(220px, 1.2fr) minmax(180px, 1fr) minmax(180px, 1fr);
   }
 
-  .form-stack > label:first-child,
   .form-stack > .score-file-field,
+  .form-stack > .readonly-field,
   .form-stack > .preset-meta {
     grid-column: 1 / -1;
   }
@@ -1437,6 +1470,8 @@ tbody tr:nth-child(odd) {
 
   .form-stack > label:first-child,
   .form-stack > .form-row,
+  .form-stack > .readonly-field,
+  .form-stack > .score-file-field,
   .form-stack > .preset-meta,
   .form-stack > .primary-button,
   .paper-form > label,

@@ -2,6 +2,8 @@
 
 [English README](README.en.md)
 
+完整使用指南见：[文档站](https://cyecho-io.github.io/ashare-lowfreq-research/)。
+
 这是一个面向个人研究使用的 A 股低频回测与盘前准备工具，目标是把数据同步、因子构建、模型训练、分数回测和模拟执行收敛到一条可维护的本地工作流里。
 
 当前仓库重点解决的是：
@@ -55,13 +57,13 @@
 <details>
   <summary>模型研究台</summary>
 
-  ![模型研究台](docs/images/research_run_page.png)
+  ![模型研究台](docs-site/research_run_page.png)
 </details>
 
 <details>
   <summary>回测控制台</summary>
 
-  ![回测控制台](docs/images/qlib_back_test.png)
+  ![回测控制台](docs-site/qlib_back_test.png)
 </details>
 
 <details>
@@ -130,7 +132,7 @@ source .venv/bin/activate
 运行内置 demo 研究配置：
 
 ```bash
-ashare-backtest run-research-config configs/demo_research.toml
+ashare-backtest run-research-config configs/qlib/demo_strategy.toml
 ```
 
 启动本地 Web 控制台：
@@ -143,15 +145,15 @@ ashare-backtest-web
 
 这个 demo 路径会给你：
 
-- 一套已跟踪的极小 A 股样例数据
-- 一个可直接运行的研究配置
+- 一套已跟踪的极小 A 股样例数据，包含项目 Parquet 数据和小型 qlib provider
+- 可直接运行的 native / qlib demo 研究配置
 - 一条会在本地生成因子、分数和回测结果的完整示例链路
 - 一份输出到 `results/demo_backtest` 的回测结果
 - 一个可查看数据状态、研究记录、回测工件和模拟视图的本地 Web 界面
 
-在打开 `/backtest` 页面之前，请先执行一次 `ashare-backtest run-research-config configs/demo_research.toml`，让 demo 分数文件先在本地生成出来。
+在打开 `/backtest` 页面之前，请先执行一次 `ashare-backtest run-research-config configs/qlib/demo_strategy.toml`，让 demo 分数文件先在本地生成出来。
 
-如果后面要切到你自己的本地数据，只需要把配置里的 `storage root` 换掉，再走下面的完整工作流即可。
+如果后面要切到你自己的本地数据，请把配置里的 `[storage].root` 换成你的项目 Parquet 数据目录；如果使用 qlib 链路，还需要把 `[qlib].provider_uri` 和 `[qlib].market` 换成你的 qlib provider。完整说明见：[接入真实数据](https://cyecho-io.github.io/ashare-lowfreq-research/real-data/)。
 
 ## 快速开始
 
@@ -223,16 +225,10 @@ ashare-backtest build-factors \
 运行研究配置：
 
 ```bash
-ashare-backtest run-research-config configs/research_industry_v4_v1_1.toml
+ashare-backtest run-research-config configs/qlib/research_industry_v4_v1_1_qlib.toml
 ```
 
-如果你要新建自己的配置，可以先从模板开始：
-
-```bash
-cp examples/demo_research_config.toml configs/demo_research.toml
-```
-
-如果你准备通过 CLI 或 Web 的 `/research` 页面运行 Qlib 研究任务，可以直接使用仓库新增的 [`configs/research_industry_v4_v1_1_qlib.toml`](/Users/yongqiuwu/works/github/Trade/configs/research_industry_v4_v1_1_qlib.toml)，或者在现有研究配置里补充一个可选的 `[qlib]` 段，例如：
+如果你准备通过 CLI 或 Web 的 `/research` 页面运行 Qlib 研究任务，可以直接使用仓库新增的 [`configs/qlib/research_industry_v4_v1_1_qlib.toml`](/Users/yongqiuwu/works/github/Trade/configs/qlib/research_industry_v4_v1_1_qlib.toml)，或者在 `configs/qlib/` 下创建带 `[qlib]` 段的配置，例如：
 
 ```toml
 [qlib]
@@ -245,10 +241,10 @@ config_id = "qlib_smoke"
 
 然后在页面里把 `研究后端` 切到 `qlib` 即可。相关说明见：[docs/qlib-integration.md](/Users/yongqiuwu/works/github/Trade/docs/qlib-integration.md)
 
-如果只是验证公开仓库是否能跑通，可以直接运行内置 demo 配置：
+如果只是验证公开仓库是否能跑通，可以直接运行仓库内置 demo 配置：
 
 ```bash
-ashare-backtest run-research-config configs/demo_research.toml
+ashare-backtest run-research-config configs/qlib/demo_strategy.toml
 ```
 
 基于模型分数执行回测：
@@ -276,7 +272,7 @@ ashare-backtest-web
 
 - `/`：数据看板，查看交易日历热力图、SQLite 数据源摘要、策略数量和最近运行概览
 - `/backtest`：回测控制台，选择配置、分数文件和区间后直接发起回测
-- `/research`：模型研究台，直接编辑 `configs/*.toml`、执行研究流水线、查看日志、产物路径和关键指标
+- `/research`：模型研究台，直接编辑 `configs/**/*.toml`、执行研究流水线、查看日志、产物路径和关键指标
 - `/simulation`：模拟成交台，创建模拟账户、查看账户状态、执行历史和状态演化
 
 `/research` 页面当前已经支持选择 `native` 或 `qlib` 研究后端；研究记录、分数文件、回测结果和模拟执行结果都会按 `workspace` / `backend` 带出 provenance 信息。
@@ -353,7 +349,7 @@ ashare-backtest-web
 
 ## 当前推荐研究配置
 
-当前推荐使用 [`configs/research_industry_v4_v1_1.toml`](/Users/yongqiuwu/works/github/Trade/configs/research_industry_v4_v1_1.toml)：
+当前推荐使用 [`configs/qlib/research_industry_v4_v1_1_qlib.toml`](/Users/yongqiuwu/works/github/Trade/configs/qlib/research_industry_v4_v1_1_qlib.toml)：
 
 - 因子面板：`industry_v4`
 - 标签：`industry_excess_fwd_return_5`

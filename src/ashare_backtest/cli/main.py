@@ -209,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Train monthly walk-forward scores using defaults loaded from a research TOML config",
     )
     wf_from_config_parser.add_argument("config_path", nargs="?", default="", help="Optional research TOML path")
-    wf_from_config_parser.add_argument("--factor-spec-id", default="", help="Resolve configs/<factor-spec-id>.toml when config path is omitted")
+    wf_from_config_parser.add_argument("--factor-spec-id", default="", help="Resolve configs/<factor-spec-id>.toml or configs/qlib/<factor-spec-id>.toml when config path is omitted")
     wf_from_config_parser.add_argument("--factor-panel-path", default="", help="Input factor panel parquet path")
     wf_from_config_parser.add_argument("--test-start-month", required=True)
     wf_from_config_parser.add_argument("--test-end-month", required=True)
@@ -266,7 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Score a single as-of date using defaults loaded from a research TOML config",
     )
     wf_asof_from_config_parser.add_argument("config_path", nargs="?", default="", help="Optional research TOML path")
-    wf_asof_from_config_parser.add_argument("--factor-spec-id", default="", help="Resolve configs/<factor-spec-id>.toml when config path is omitted")
+    wf_asof_from_config_parser.add_argument("--factor-spec-id", default="", help="Resolve configs/<factor-spec-id>.toml or configs/qlib/<factor-spec-id>.toml when config path is omitted")
     wf_asof_from_config_parser.add_argument(
         "--as-of-date",
         default="",
@@ -293,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Score a single date using the model implied by a specific walk-forward test month",
     )
     wf_single_from_config_parser.add_argument("config_path", nargs="?", default="", help="Optional research TOML path")
-    wf_single_from_config_parser.add_argument("--factor-spec-id", default="", help="Resolve configs/<factor-spec-id>.toml when config path is omitted")
+    wf_single_from_config_parser.add_argument("--factor-spec-id", default="", help="Resolve configs/<factor-spec-id>.toml or configs/qlib/<factor-spec-id>.toml when config path is omitted")
     wf_single_from_config_parser.add_argument("--factor-panel-path", default="", help="Optional factor panel override")
     wf_single_from_config_parser.add_argument("--test-month", required=True, help="Walk-forward test month, YYYY-MM")
     wf_single_from_config_parser.add_argument("--as-of-date", required=True, help="Target scoring date, YYYY-MM-DD")
@@ -478,7 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Measure start-date sensitivity using defaults loaded from a research TOML config",
     )
     robustness_from_config_parser.add_argument("config_path", nargs="?", default="", help="Optional research TOML path")
-    robustness_from_config_parser.add_argument("--factor-spec-id", default="", help="Resolve configs/<factor-spec-id>.toml when config path is omitted")
+    robustness_from_config_parser.add_argument("--factor-spec-id", default="", help="Resolve configs/<factor-spec-id>.toml or configs/qlib/<factor-spec-id>.toml when config path is omitted")
     robustness_from_config_parser.add_argument("--scores-path", default="", help="Optional override score parquet path")
     robustness_from_config_parser.add_argument("--analysis-start-date", default="")
     robustness_from_config_parser.add_argument("--analysis-end-date", default="")
@@ -533,7 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate a premarket reference using defaults loaded from a research TOML config",
     )
     premarket_from_config_parser.add_argument("config_path", nargs="?", default="", help="Optional research TOML path")
-    premarket_from_config_parser.add_argument("--factor-spec-id", default="", help="Resolve configs/<factor-spec-id>.toml when config path is omitted")
+    premarket_from_config_parser.add_argument("--factor-spec-id", default="", help="Resolve configs/<factor-spec-id>.toml or configs/qlib/<factor-spec-id>.toml when config path is omitted")
     premarket_from_config_parser.add_argument("--scores-path", required=True)
     premarket_from_config_parser.add_argument("--trade-date", required=True)
     premarket_from_config_parser.add_argument(

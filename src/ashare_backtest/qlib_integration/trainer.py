@@ -35,9 +35,9 @@ def _serialize_metrics(output_path: str, metrics: dict[str, object]) -> None:
 
 
 def train_qlib_walk_forward(config: QlibWalkForwardConfig) -> dict[str, object]:
-    end_date = pd.Period(config.test_end_month, freq="M").end_time.date().isoformat()
     start_anchor = pd.Period(config.test_start_month, freq="M") - (config.train_window_months + config.validation_window_months)
-    start_date = start_anchor.start_time.date().isoformat()
+    start_date = config.data_start_date or start_anchor.start_time.date().isoformat()
+    end_date = config.data_end_date or pd.Period(config.test_end_month, freq="M").end_time.date().isoformat()
     frame = load_qlib_market_frame(config, start_date=start_date, end_date=end_date)
     feature_columns = _feature_columns(config)
     frame["month"] = pd.PeriodIndex(frame["trade_date"], freq="M")

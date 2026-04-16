@@ -57,7 +57,7 @@ function renderLogOutput(content) {
 
 function renderActiveConfigMeta(configPath) {
   const workspace = window.AshareWorkspace.getWorkspace();
-  researchEls.configFilename.textContent = `${configPath || "configs/*.toml"} · ${workspace}`;
+  researchEls.configFilename.textContent = `${configPath || "configs/**/*.toml"} · ${workspace}`;
 }
 
 function renderResearchRuns() {

@@ -5,6 +5,7 @@ __pycache__/
 .idea/
 .coverage
 htmlcov/
+site/
 *.log
 .DS_Store
 .env
@@ -12,7 +13,13 @@ htmlcov/
 
 strategies/registry.json
 strategies/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]_*.py
-results/
+/results/*
+!/results/qlib/
+/results/qlib/*
+!/results/qlib/research_runs/
+/results/qlib/research_runs/*
+!/results/qlib/research_runs/demo-strategy-qlib-research/
+!/results/qlib/research_runs/demo-strategy-qlib-research/**
 
 # Generated research artifacts
 research/factors/
@@ -30,6 +37,8 @@ storage/source/
 # Keep repository docs under storage/
 !storage/README.md
 AGENTS.md
-tests
 src/ashare_backtest.egg-info
 docs/archive
+
+/configs/qlib/*
+!/configs/qlib/demo_strategy.toml
