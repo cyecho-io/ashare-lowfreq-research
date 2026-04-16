@@ -1,0 +1,42 @@
+[storage]
+root = "storage/demo"
+
+[factor_spec]
+id = "demo_strategy_native"
+universe_name = "tradable_core"
+start_date = "2024-01-02"
+
+[research_snapshot]
+as_of_date = "2026-02-27"
+
+[factors]
+output_path = "research/native/demo/factors/demo_strategy.parquet"
+
+[training]
+label_column = "industry_excess_fwd_return_5"
+train_window_months = 12
+validation_window_months = 1
+test_start_month = "2025-01"
+test_end_month = "2026-02"
+score_output_path = "research/native/demo/models/demo_scores.parquet"
+metric_output_path = "research/native/demo/models/demo_metrics.json"
+
+[analysis]
+layer_output_path = "research/native/demo/models/demo_layer.json"
+
+[model_backtest]
+output_dir = "results/native/demo_backtest"
+start_date = "2025-01-02"
+end_date = "2026-02-27"
+top_k = 6
+rebalance_every = 5
+lookback_window = 20
+min_hold_bars = 8
+keep_buffer = 2
+min_turnover_names = 3
+min_daily_amount = 0
+max_names_per_industry = 2
+initial_cash = 100000
+commission_rate = 0.0003
+stamp_tax_rate = 0.001
+slippage_rate = 0.0005

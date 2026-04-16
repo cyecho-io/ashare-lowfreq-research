@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+
+import pandas as pd
 
 from ashare_backtest.factors import resolve_factor_snapshot_path
 
@@ -77,10 +80,15 @@ def resolve_research_config_path(config_path: str | Path = "", factor_spec_id: s
     if config_path:
         return Path(config_path).resolve()
     if factor_spec_id:
-        candidate = Path("configs") / f"{factor_spec_id}.toml"
-        if candidate.exists():
-            return candidate.resolve()
-        raise FileNotFoundError(f"Research config not found for factor_spec_id={factor_spec_id}: {candidate}")
+        candidates = (
+            Path("configs") / f"{factor_spec_id}.toml",
+            Path("configs") / "qlib" / f"{factor_spec_id}.toml",
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate.resolve()
+        searched = ", ".join(candidate.as_posix() for candidate in candidates)
+        raise FileNotFoundError(f"Research config not found for factor_spec_id={factor_spec_id}: {searched}")
     raise ValueError("Either config_path or factor_spec_id must be provided")
 
 
@@ -92,7 +100,9 @@ def resolve_dated_output_path(base_path: str | Path, as_of_date: str) -> str:
 def resolve_research_run_output_paths(config: ResearchRunConfig, output_dir: str | Path) -> ResearchRunOutputPaths:
     root = Path(output_dir)
     return ResearchRunOutputPaths(
-        factor_snapshot_path=(root / Path(config.factor_snapshot_path).name).as_posix(),
+        factor_snapshot_path=(root / Path(config.factor_snapshot_path).name).as_posix()
+        if config.factor_snapshot_path
+        else "",
         score_output_path=(root / Path(config.score_output_path).name).as_posix(),
         metric_output_path=(root / Path(config.metric_output_path).name).as_posix(),
         layer_output_path=(root / Path(config.layer_output_path).name).as_posix(),
@@ -100,29 +110,159 @@ def resolve_research_run_output_paths(config: ResearchRunConfig, output_dir: str
     )
 
 
+def _month_period(value: str, *, field_name: str) -> pd.Period:
+    try:
+        return pd.Period(str(value), freq="M")
+    except Exception as exc:
+        raise ValueError(f"{field_name} must be YYYY-MM") from exc
+
+
+def _date_value(value: object, *, field_name: str) -> date:
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be YYYY-MM-DD") from exc
+
+
+def _load_open_trade_dates(storage_root: str) -> tuple[date, ...]:
+    calendar_path = Path(storage_root) / "parquet" / "calendar" / "ashare_trading_calendar.parquet"
+    if not calendar_path.exists():
+        return ()
+    calendar = pd.read_parquet(calendar_path, columns=["trade_date", "is_open"])
+    open_calendar = calendar.loc[calendar["is_open"], ["trade_date"]].sort_values("trade_date")
+    return tuple(item.date() for item in open_calendar["trade_date"].tolist())
+
+
+def _first_open_date_or_month_start(storage_root: str, month: pd.Period) -> str:
+    month_start = month.start_time.date()
+    month_end = month.end_time.date()
+    for trade_date in _load_open_trade_dates(storage_root):
+        if month_start <= trade_date <= month_end:
+            return trade_date.isoformat()
+    return month_start.isoformat()
+
+
+def _last_open_date_or_end_date(storage_root: str, start_date: date, end_date: date) -> str:
+    candidates = [item for item in _load_open_trade_dates(storage_root) if start_date <= item <= end_date]
+    if candidates:
+        return candidates[-1].isoformat()
+    return end_date.isoformat()
+
+
+def _resolve_qlib_dates(
+    *,
+    storage_root: str,
+    factor_spec: dict,
+    research_snapshot: dict,
+    backtest: dict,
+    train_window_months: int,
+    validation_window_months: int,
+    test_start_month: str,
+    test_end_month: str,
+) -> tuple[str, str, str, str]:
+    start_period = _month_period(test_start_month, field_name="training.test_start_month")
+    end_period = _month_period(test_end_month, field_name="training.test_end_month")
+    if end_period < start_period:
+        raise ValueError("training.test_end_month must be on or after training.test_start_month")
+
+    derived_start = (
+        start_period - (train_window_months + validation_window_months)
+    ).start_time.date()
+    configured_start = str(factor_spec.get("start_date") or "").strip()
+    if configured_start:
+        start_date = _date_value(configured_start, field_name="factor_spec.start_date")
+        if start_date > derived_start:
+            raise ValueError(
+                "factor_spec.start_date is later than the qlib training data start "
+                f"derived from training windows: {derived_start.isoformat()}"
+            )
+        data_start_date = start_date
+    else:
+        data_start_date = derived_start
+
+    snapshot_as_of = str(research_snapshot.get("as_of_date") or "").strip()
+    if snapshot_as_of:
+        data_end_date = _date_value(snapshot_as_of, field_name="research_snapshot.as_of_date")
+        if pd.Period(data_end_date, freq="M") != end_period:
+            raise ValueError("research_snapshot.as_of_date must fall within training.test_end_month")
+    else:
+        data_end_date = end_period.end_time.date()
+
+    coverage_start = start_period.start_time.date()
+    explicit_backtest_start = str(backtest.get("start_date") or "").strip()
+    explicit_backtest_end = str(backtest.get("end_date") or "").strip()
+    if explicit_backtest_start:
+        backtest_start = _date_value(explicit_backtest_start, field_name="model_backtest.start_date")
+    else:
+        backtest_start = _date_value(
+            _first_open_date_or_month_start(storage_root, start_period),
+            field_name="model_backtest.start_date",
+        )
+    if explicit_backtest_end:
+        backtest_end = _date_value(explicit_backtest_end, field_name="model_backtest.end_date")
+    else:
+        backtest_end = _date_value(
+            _last_open_date_or_end_date(storage_root, coverage_start, data_end_date),
+            field_name="model_backtest.end_date",
+        )
+
+    if backtest_start < coverage_start or backtest_end > data_end_date:
+        raise ValueError("backtest range exceeds score coverage")
+    if backtest_end < backtest_start:
+        raise ValueError("model_backtest.end_date must be on or after model_backtest.start_date")
+
+    return (
+        data_start_date.isoformat(),
+        data_end_date.isoformat(),
+        backtest_start.isoformat(),
+        backtest_end.isoformat(),
+    )
+
+
 def load_research_config(path: str | Path) -> ResearchRunConfig:
     resolved_path = Path(path)
     payload = tomllib.loads(resolved_path.read_text(encoding="utf-8"))
     storage = payload["storage"]
-    factors = payload["factors"]
+    has_qlib = "qlib" in payload and isinstance(payload.get("qlib"), dict)
+    factors = payload.get("factors", {}) if has_qlib else payload["factors"]
     training = payload["training"]
     analysis = payload["analysis"]
     backtest = payload["model_backtest"]
     factor_spec = payload.get("factor_spec", {})
     research_snapshot = payload.get("research_snapshot", {})
+    storage_root = str(storage.get("root", "storage"))
     factor_spec_id = str(factor_spec.get("id") or factors.get("id") or resolved_path.stem)
     factor_universe_name = str(factor_spec.get("universe_name") or factors.get("universe_name", ""))
-    factor_start_date = str(factor_spec.get("start_date") or factors["start_date"])
-    factor_as_of_date = str(research_snapshot.get("as_of_date") or factors.get("as_of_date") or factors["end_date"])
-    factor_output_path = str(
-        factors.get("output_path")
-        or resolve_factor_snapshot_path(
-            factor_spec_id=factor_spec_id,
-            as_of_date=factor_as_of_date,
-            universe_name=factor_universe_name,
-            start_date=factor_start_date,
+    train_window_months = int(training.get("train_window_months", 12))
+    validation_window_months = int(training.get("validation_window_months", 1))
+    test_start_month = str(training["test_start_month"])
+    test_end_month = str(training["test_end_month"])
+    if has_qlib:
+        factor_start_date, factor_as_of_date, backtest_start_date, backtest_end_date = _resolve_qlib_dates(
+            storage_root=storage_root,
+            factor_spec=factor_spec,
+            research_snapshot=research_snapshot,
+            backtest=backtest,
+            train_window_months=train_window_months,
+            validation_window_months=validation_window_months,
+            test_start_month=test_start_month,
+            test_end_month=test_end_month,
         )
-    )
+        factor_output_path = str(factors.get("output_path") or "")
+    else:
+        factor_start_date = str(factor_spec.get("start_date") or factors["start_date"])
+        factor_as_of_date = str(research_snapshot.get("as_of_date") or factors.get("as_of_date") or factors["end_date"])
+        backtest_start_date = str(backtest["start_date"])
+        backtest_end_date = str(backtest["end_date"])
+        factor_output_path = str(
+            factors.get("output_path")
+            or resolve_factor_snapshot_path(
+                factor_spec_id=factor_spec_id,
+                as_of_date=factor_as_of_date,
+                universe_name=factor_universe_name,
+                start_date=factor_start_date,
+            )
+        )
     raw_feature_columns = training.get("feature_columns", ())
     if raw_feature_columns is None:
         feature_columns: tuple[str, ...] = ()
@@ -131,7 +271,7 @@ def load_research_config(path: str | Path) -> ResearchRunConfig:
     else:
         raise ValueError("training.feature_columns must be an array of strings when provided")
     return ResearchRunConfig(
-        storage_root=str(storage.get("root", "storage")),
+        storage_root=storage_root,
         factor_spec_id=factor_spec_id,
         factor_output_path=factor_output_path,
         factor_snapshot_path=factor_output_path,
@@ -141,16 +281,16 @@ def load_research_config(path: str | Path) -> ResearchRunConfig:
         factor_end_date=factor_as_of_date,
         label_column=str(training.get("label_column", "excess_fwd_return_5")),
         feature_columns=feature_columns,
-        train_window_months=int(training.get("train_window_months", 12)),
-        validation_window_months=int(training.get("validation_window_months", 1)),
-        test_start_month=str(training["test_start_month"]),
-        test_end_month=str(training["test_end_month"]),
+        train_window_months=train_window_months,
+        validation_window_months=validation_window_months,
+        test_start_month=test_start_month,
+        test_end_month=test_end_month,
         score_output_path=str(training["score_output_path"]),
         metric_output_path=str(training["metric_output_path"]),
         layer_output_path=str(analysis["layer_output_path"]),
         model_backtest_output_dir=str(backtest["output_dir"]),
-        backtest_start_date=str(backtest["start_date"]),
-        backtest_end_date=str(backtest["end_date"]),
+        backtest_start_date=backtest_start_date,
+        backtest_end_date=backtest_end_date,
         top_k=int(backtest.get("top_k", 5)),
         rebalance_every=int(backtest.get("rebalance_every", 3)),
         lookback_window=int(backtest.get("lookback_window", 20)),

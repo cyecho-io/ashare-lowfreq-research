@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
+from typing import Any
 
 from ashare_backtest.cli.research_config import (
     load_research_config,
@@ -9,6 +11,11 @@ from ashare_backtest.cli.research_config import (
     resolve_research_run_output_paths,
 )
 from ashare_backtest.factors import FactorBuildConfig, FactorBuilder
+from ashare_backtest.qlib_integration import (
+    QlibWalkForwardConfig,
+    parse_qlib_feature_specs,
+    train_qlib_walk_forward,
+)
 from ashare_backtest.research import (
     DEFAULT_FEATURE_COLUMNS,
     LayeredAnalysisConfig,
@@ -23,6 +30,10 @@ from ashare_backtest.research import (
 
 
 def run_research_pipeline(config_path: str, output_dir: str | Path | None = None) -> dict[str, object]:
+    qlib_section = _load_qlib_section(Path(config_path))
+    if qlib_section is not None:
+        return run_qlib_research_pipeline(config_path, output_dir=output_dir, qlib_section=qlib_section)
+
     config = load_research_config(config_path)
     resolved_config_path = Path(config_path).resolve()
     resolved_output_paths = (
@@ -134,6 +145,145 @@ def run_research_pipeline(config_path: str, output_dir: str | Path | None = None
         "configured_layer_output_path": config.layer_output_path,
         "training_metrics": training_metrics,
         "layer_summary": layer_summary,
+    }
+
+
+def _load_qlib_section(config_path: Path) -> dict[str, Any] | None:
+    try:
+        payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
+        return None
+    if "qlib" not in payload:
+        return None
+    section = payload.get("qlib", {})
+    return section if isinstance(section, dict) else {}
+
+
+def _resolve_qlib_feature_specs(qlib_section: dict[str, Any]) -> tuple[Any, ...]:
+    raw_feature_specs = qlib_section.get("feature_specs")
+    raw_feature_columns = qlib_section.get("feature_columns", ())
+    if raw_feature_columns is not None and not isinstance(raw_feature_columns, (list, tuple)):
+        raise ValueError("qlib.feature_columns must be an array of strings when provided")
+    normalized_feature_columns = None
+    if isinstance(raw_feature_columns, (list, tuple)):
+        normalized_feature_columns = tuple(str(item).strip() for item in raw_feature_columns if str(item).strip())
+    return parse_qlib_feature_specs(
+        feature_specs=raw_feature_specs,
+        feature_columns=normalized_feature_columns,
+    )
+
+
+def run_qlib_research_pipeline(
+    config_path: str,
+    output_dir: str | Path | None = None,
+    qlib_section: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    config = load_research_config(config_path)
+    resolved_config_path = Path(config_path).resolve()
+    resolved_output_paths = (
+        resolve_research_run_output_paths(config, output_dir) if output_dir is not None else None
+    )
+    score_output_path = (
+        resolved_output_paths.score_output_path if resolved_output_paths is not None else config.score_output_path
+    )
+    metric_output_path = (
+        resolved_output_paths.metric_output_path if resolved_output_paths is not None else config.metric_output_path
+    )
+    layer_output_path = (
+        resolved_output_paths.layer_output_path if resolved_output_paths is not None else config.layer_output_path
+    )
+    resolved_qlib_section = qlib_section if qlib_section is not None else (_load_qlib_section(resolved_config_path) or {})
+    provider_uri = str(resolved_qlib_section.get("provider_uri") or "~/.qlib/qlib_data/cn_data")
+    region = str(resolved_qlib_section.get("region") or "cn")
+    market = str(resolved_qlib_section.get("market") or "csi300")
+    model_name = str(resolved_qlib_section.get("model_name") or "lgbm")
+    config_id = str(resolved_qlib_section.get("config_id") or config.factor_spec_id)
+    label_mode = str(resolved_qlib_section.get("label_mode") or "raw_fwd_return_5")
+    label_expression = str(resolved_qlib_section.get("label_expression") or "Ref($close, -5) / Ref($close, -1) - 1")
+    feature_specs = _resolve_qlib_feature_specs(resolved_qlib_section)
+
+    print(
+        "RESEARCH_PIPELINE "
+        f"backend=qlib "
+        f"config={resolved_config_path.as_posix()} "
+        f"config_id={config_id} "
+        f"test_start_month={config.test_start_month} "
+        f"test_end_month={config.test_end_month}"
+    )
+    print(
+        "RESEARCH_STEP "
+        f"name=qlib_train_walk_forward "
+        f"market={market} "
+        f"scores={score_output_path} "
+        f"metrics={metric_output_path}"
+    )
+    training_metrics = train_qlib_walk_forward(
+        QlibWalkForwardConfig(
+            storage_root=config.storage_root,
+            universe_name=config.factor_universe_name,
+            provider_uri=provider_uri,
+            region=region,
+            market=market,
+            config_id=config_id,
+            model_name=model_name,
+            label_mode=label_mode,
+            label_expression=label_expression,
+            feature_specs=feature_specs,
+            train_window_months=config.train_window_months,
+            validation_window_months=config.validation_window_months,
+            test_start_month=config.test_start_month,
+            test_end_month=config.test_end_month,
+            data_start_date=config.factor_start_date,
+            data_end_date=config.factor_as_of_date,
+            output_scores_path=score_output_path,
+            output_metrics_path=metric_output_path,
+        )
+    )
+    print(
+        "RESEARCH_STEP_DONE "
+        f"name=qlib_train_walk_forward "
+        f"windows={training_metrics['window_count']} "
+        f"mean_spearman_ic={training_metrics['mean_spearman_ic']} "
+        f"scores={score_output_path}"
+    )
+    print(
+        "RESEARCH_STEP "
+        f"name=analyze_score_layers "
+        f"scores={score_output_path} "
+        f"output={layer_output_path}"
+    )
+    layer_payload = analyze_score_layers(
+        LayeredAnalysisConfig(
+            scores_path=score_output_path,
+            output_path=layer_output_path,
+            bins=5,
+        )
+    )
+    layer_summary = dict(layer_payload.get("summary", {}))
+    print(
+        "RESEARCH_STEP_DONE "
+        f"name=analyze_score_layers "
+        f"rows={layer_summary.get('rows', 0)} "
+        f"mean_top_bottom_spread={float(layer_summary.get('mean_top_bottom_spread', 0.0)):.6f} "
+        f"output={layer_output_path}"
+    )
+    return {
+        "backend": "qlib",
+        "model": model_name,
+        "config_id": config_id,
+        "config_path": resolved_config_path.as_posix(),
+        "factor_path": "",
+        "scores_path": score_output_path,
+        "metrics_path": metric_output_path,
+        "layer_output_path": layer_output_path,
+        "configured_factor_path": config.factor_snapshot_path,
+        "configured_scores_path": config.score_output_path,
+        "configured_metrics_path": config.metric_output_path,
+        "configured_layer_output_path": config.layer_output_path,
+        "training_metrics": training_metrics,
+        "layer_summary": layer_summary,
+        "provider_uri": provider_uri,
+        "market": market,
     }
 
 

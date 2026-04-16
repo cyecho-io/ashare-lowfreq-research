@@ -35,9 +35,9 @@ def _serialize_metrics(output_path: str, metrics: dict[str, object]) -> None:
 
 
 def train_qlib_walk_forward(config: QlibWalkForwardConfig) -> dict[str, object]:
-    end_date = pd.Period(config.test_end_month, freq="M").end_time.date().isoformat()
     start_anchor = pd.Period(config.test_start_month, freq="M") - (config.train_window_months + config.validation_window_months)
-    start_date = start_anchor.start_time.date().isoformat()
+    start_date = config.data_start_date or start_anchor.start_time.date().isoformat()
+    end_date = config.data_end_date or pd.Period(config.test_end_month, freq="M").end_time.date().isoformat()
     frame = load_qlib_market_frame(config, start_date=start_date, end_date=end_date)
     feature_columns = _feature_columns(config)
     frame["month"] = pd.PeriodIndex(frame["trade_date"], freq="M")
@@ -142,6 +142,7 @@ def train_qlib_walk_forward(config: QlibWalkForwardConfig) -> dict[str, object]:
         "provider_uri": config.provider_uri,
         "market": config.market,
         "feature_columns": list(feature_columns),
+        "label_mode": config.label_mode,
         "label_expression": config.label_expression,
         "window_count": len(window_metrics),
         "total_scored_rows": int(len(exported)),
@@ -200,6 +201,8 @@ def train_qlib_as_of_date(config: QlibAsOfDateConfig) -> dict[str, object]:
         "config_id": config.config_id,
         "as_of_date": config.as_of_date,
         "feature_columns": list(feature_columns),
+        "label_mode": config.label_mode,
+        "label_expression": config.label_expression,
         "train_rows": int(len(train_frame)),
         "scored_rows": int(len(exported)),
         **eval_metrics,
@@ -252,6 +255,8 @@ def train_qlib_single_date(config: QlibSingleDateConfig) -> dict[str, object]:
         "test_month": config.test_month,
         "as_of_date": config.as_of_date,
         "feature_columns": list(feature_columns),
+        "label_mode": config.label_mode,
+        "label_expression": config.label_expression,
         "train_rows": int(len(train_frame)),
         "scored_rows": int(len(exported)),
         **eval_metrics,

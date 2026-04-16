@@ -1,0 +1,136 @@
+[storage]
+root = "storage"
+
+[factor_spec]
+id = "research_industry_v4_v1_1_qlib_native21"
+universe_name = "tradable_core"
+start_date = "2019-01-02"
+
+[research_snapshot]
+as_of_date = "2026-03-27"
+
+[factors]
+output_path = "research/factors/research_industry_v4_v1_1_qlib_native21/tradable_core/start_2019-01-02/asof_2026-03-27.parquet"
+
+[training]
+# Retained for shared research config compatibility.
+# The qlib backend ignores label_column and uses its own label expression.
+label_column = "industry_excess_fwd_return_5"
+train_window_months = 12
+test_start_month = "2025-01"
+test_end_month = "2026-02"
+score_output_path = "research/models/walk_forward_scores_industry_v4_v1_1_qlib_native21.parquet"
+metric_output_path = "research/models/walk_forward_metrics_industry_v4_v1_1_qlib_native21.json"
+
+[analysis]
+layer_output_path = "research/models/walk_forward_layer_analysis_industry_v4_v1_1_qlib_native21.json"
+
+[qlib]
+provider_uri = "~/.qlib/qlib_data/cn_data"
+region = "cn"
+market = "all"
+model_name = "lgbm"
+config_id = "research_industry_v4_v1_1_qlib_native21"
+label_mode = "industry_excess_fwd_return_5"
+label_expression = "Ref($close, -5) / Ref($close, -1) - 1"
+
+[[qlib.feature_specs]]
+name = "mom_5"
+expression = "$close / Ref($close, 5) - 1"
+
+[[qlib.feature_specs]]
+name = "mom_10"
+expression = "$close / Ref($close, 10) - 1"
+
+[[qlib.feature_specs]]
+name = "mom_20"
+expression = "$close / Ref($close, 20) - 1"
+
+[[qlib.feature_specs]]
+name = "mom_60"
+expression = "$close / Ref($close, 60) - 1"
+
+[[qlib.feature_specs]]
+name = "ma_gap_5"
+expression = "$close / Mean($close, 5) - 1"
+
+[[qlib.feature_specs]]
+name = "ma_gap_10"
+expression = "$close / Mean($close, 10) - 1"
+
+[[qlib.feature_specs]]
+name = "ma_gap_20"
+expression = "$close / Mean($close, 20) - 1"
+
+[[qlib.feature_specs]]
+name = "ma_gap_60"
+expression = "$close / Mean($close, 60) - 1"
+
+[[qlib.feature_specs]]
+name = "volatility_10"
+expression = "Std($close / Ref($close, 1) - 1, 10)"
+
+[[qlib.feature_specs]]
+name = "volatility_20"
+expression = "Std($close / Ref($close, 1) - 1, 20)"
+
+[[qlib.feature_specs]]
+name = "volatility_60"
+expression = "Std($close / Ref($close, 1) - 1, 60)"
+
+[[qlib.feature_specs]]
+name = "range_ratio_5"
+expression = "Mean($high / $low - 1, 5)"
+
+[[qlib.feature_specs]]
+name = "volume_ratio_5_20"
+expression = "Mean($volume, 5) / Mean($volume, 20)"
+
+[[qlib.feature_specs]]
+name = "amount_ratio_5_20"
+expression = "Mean($amount, 5) / Mean($amount, 20)"
+
+[[qlib.feature_specs]]
+name = "amount_mom_10"
+expression = "$amount / Ref($amount, 10) - 1"
+
+[[qlib.feature_specs]]
+name = "price_pos_20"
+expression = "($close - Min($close, 20)) / (Max($close, 20) - Min($close, 20))"
+
+[[qlib.feature_specs]]
+name = "volatility_ratio_10_60"
+expression = "Std($close / Ref($close, 1) - 1, 10) / Std($close / Ref($close, 1) - 1, 60)"
+
+[[qlib.feature_specs]]
+name = "trend_strength_20"
+expression = "($close / Ref($close, 20) - 1) / Std($close / Ref($close, 1) - 1, 20)"
+
+[[qlib.feature_specs]]
+name = "cross_rank_mom_20"
+expression = "Rank($close / Ref($close, 20) - 1)"
+
+[[qlib.feature_specs]]
+name = "cross_rank_amount_ratio_5_20"
+expression = "Rank(Mean($amount, 5) / Mean($amount, 20))"
+
+[[qlib.feature_specs]]
+name = "cross_rank_volatility_20"
+expression = "1 - Rank(Std($close / Ref($close, 1) - 1, 20))"
+
+[model_backtest]
+output_dir = "results/model_score_backtest_walk_forward_industry_v4_v1_1_qlib_native21"
+start_date = "2025-01-03"
+end_date = "2026-03-27"
+top_k = 6
+rebalance_every = 5
+lookback_window = 20
+min_hold_bars = 8
+keep_buffer = 2
+min_turnover_names = 3
+min_daily_amount = 0
+max_names_per_industry = 2
+initial_cash = 100000
+commission_rate = 0.0003
+stamp_tax_rate = 0.001
+slippage_rate = 0.0005

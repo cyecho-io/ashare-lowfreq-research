@@ -130,14 +130,11 @@ root = "storage"
 [factor_spec]
 id = "industry_v4_v1_1"
 universe_name = "tradable_core"
-start_date = "2024-01-02"
-
-[research_snapshot]
-as_of_date = "2026-03-31"
 
 [training]
 label_column = "industry_excess_fwd_return_5"
 train_window_months = 12
+validation_window_months = 1
 test_start_month = "2026-01"
 test_end_month = "2026-02"
 score_output_path = "research/models/walk_forward_scores.parquet"
@@ -152,14 +149,22 @@ region = "cn"
 market = "csi300"
 model_name = "lgbm"
 config_id = "qlib_smoke"
+
+[model_backtest]
+output_dir = "results/model_score_backtest_qlib_smoke"
+top_k = 6
+rebalance_every = 5
+lookback_window = 20
 ```
 
 说明：
 
 - `[qlib]` 目前只在 Web 里的 `backend=qlib` 研究任务中生效
 - 没有提供 `[qlib]` 时，会使用代码里的默认值
-- native research path 会忽略这个段，不会报错
-- Qlib 路径目前仍复用 `[training]` 里的时间窗口定义，例如 `train_window_months`、`test_start_month`、`test_end_month`
+- Qlib 路径以 `[training].test_start_month` / `test_end_month` 为时间主线，自动推导训练取数窗口
+- Qlib 不需要配置 `[factors].output_path`，也不需要手写 `factor_spec.start_date` 或 `research_snapshot.as_of_date`
+- `[model_backtest].start_date` / `end_date` 可省略；省略时会按交易日历覆盖完整打分月份
+- native research path 仍需要 factor panel 的 `start_date` / `as_of_date` 或 `[factors]` 配置
 
 ## Web 控制台使用方式
 

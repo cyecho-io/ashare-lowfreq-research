@@ -8,7 +8,7 @@
 
 当前默认策略参数来自：
 
-- [research_industry_v4_v1_1.toml](/Users/yongqiuwu/works/github/Trade/configs/research_industry_v4_v1_1.toml)
+- [research_industry_v4_v1_1_qlib.toml](/Users/yongqiuwu/works/github/Trade/configs/qlib/research_industry_v4_v1_1_qlib.toml)
 
 ## 目标
 

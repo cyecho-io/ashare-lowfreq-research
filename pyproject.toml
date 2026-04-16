@@ -22,6 +22,10 @@ dev = [
 qlib = [
     "pyqlib>=0.9.6",
 ]
+docs = [
+    "mkdocs>=1.6,<2",
+    "mkdocs-material>=9.5,<10",
+]
 
 [project.scripts]
 ashare-backtest = "ashare_backtest.cli.main:main"

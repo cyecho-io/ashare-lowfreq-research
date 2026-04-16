@@ -1,0 +1,41 @@
+[storage]
+root = "storage/demo"
+
+[factor_spec]
+id = "demo_strategy"
+universe_name = "tradable_core"
+
+[training]
+label_column = "industry_excess_fwd_return_5"
+train_window_months = 12
+test_start_month = "2025-01"
+test_end_month = "2026-02"
+score_output_path = "research/qlib/demo/models/demo_scores.parquet"
+metric_output_path = "research/qlib/demo/models/demo_metrics.json"
+
+[analysis]
+layer_output_path = "research/qlib/demo/models/demo_layer.json"
+
+[qlib]
+provider_uri = "storage/demo/qlib_data/cn_data"
+region = "cn"
+market = "demo"
+model_name = "lgbm"
+config_id = "demo_strategy"
+
+[model_backtest]
+output_dir = "results/qlib/demo_backtest"
+start_date = "2025-01-02"
+end_date = "2026-02-27"
+top_k = 6
+rebalance_every = 5
+lookback_window = 20
+min_hold_bars = 8
+keep_buffer = 2
+min_turnover_names = 3
+min_daily_amount = 0
+max_names_per_industry = 2
+initial_cash = 100000
+commission_rate = 0.0003
+stamp_tax_rate = 0.001
+slippage_rate = 0.0005
