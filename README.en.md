@@ -1,47 +1,45 @@
-# A-Share Low-Frequency Backtesting Toolkit
+# A Share Quant Research Workspace
 
 [中文说明](README.md)
 
 Full usage guide: [Documentation](https://cyecho-io.github.io/ashare-lowfreq-research/).
 
-This repository is a personal A-share research and backtesting toolkit focused on a narrow, maintainable workflow:
+This repository is a local A-share quant research workspace for individual researchers. It supports native and qlib research pipelines, score backtests, a local web console, and simulation-oriented downstream workflows.
 
-- sync and standardize local A-share market data
-- build factor panels and train score models
-- run score-driven backtests with realistic execution constraints
-- inspect results in a lightweight web console
-- generate latest stock selection, premarket reference, and simulation artifacts
+## Core Workflow
 
-The project is intentionally opinionated. It is not trying to become a general-purpose quant platform.
+![Core Workflow](docs/images/core_workflow.svg)
+
+## What The Project Can Do Today
+
+The repository is no longer just a small backtest utility. It now provides a local end-to-end workflow with:
+
+- a web-first entry point for research, backtest, and simulation tasks
+- native and qlib research pipelines that both produce downstream-compatible `scores.parquet`
+- workspace isolation for `native` and `qlib` runs, score files, backtests, and simulation outputs
+- bundled demo data, including project parquet data and a tiny qlib provider
+- a real-data path based on Tushare sync to SQLite and import into project parquet storage
+- preserved research artifacts such as config snapshots, logs, metrics, layer analysis, and backtest results
+- one local loop spanning research, score backtests, latest inference, premarket references, and simulation entry points
 
 ## Current Scope
+
+This project is intentionally scoped:
 
 - Market: mainland China A-shares
 - Frequency: daily bars
 - Strategy shape: long-only stock portfolios
 - Research loop: factor build -> model training -> walk-forward / latest inference -> score backtest
-- Execution controls: commission, stamp tax, slippage, participation cap, pending-order handling
-- Interfaces: CLI plus a local backtest web console
+- Execution controls: commission, stamp tax, slippage, participation cap, and pending-order handling
+- Interfaces: CLI plus a local web console
 
 Out of scope for now:
 
-- intraday / tick-level simulation
-- derivatives, margin, or multi-asset portfolios
-- distributed scheduling and multi-tenant infrastructure
-- arbitrary unrestricted Python strategy execution
-
-## Repository Layout
-
-- `src/ashare_backtest/`: core package
-- `src/ashare_backtest/web/`: local dashboard, backtest, and simulation console
-- `configs/`: runnable backtest and research configs
-- `research/`: local factor panels, model outputs, and latest artifacts
-- `storage/`: normalized parquet market data and source SQLite database
-- `strategies/`: protocol-constrained strategy scripts
-- `docs/`: research notes, runbooks, and design docs
-- `tests/`: regression tests
-
-Generated outputs under `results/`, `research/factors/`, and `research/models/` are treated as local artifacts and are ignored by Git.
+- a general multi-asset quant platform
+- intraday or tick-level simulation
+- derivatives, margin, or complex account systems
+- unrestricted arbitrary Python strategy execution
+- distributed scheduling or multi-tenant infrastructure
 
 ## Installation
 
@@ -56,71 +54,94 @@ This exposes:
 - `ashare-backtest`
 - `ashare-backtest-web`
 
-Copy the environment template before using Tushare-backed commands:
+Copy the environment template first:
 
 ```bash
 cp .env.example .env
 ```
 
-Then fill in `TUSHARE_TOKEN` when you want to sync real market data.
+You only need `TUSHARE_TOKEN` when syncing real market data.
+
+If you want to use the qlib research path, also install:
+
+```bash
+python -m pip install -e ".[qlib]"
+```
+
+See [docs/qlib-integration.md](docs/qlib-integration.md) for more detail.
 
 ## Quick Demo
 
-If you want to evaluate the repository after clone without preparing your own market data, use the bundled tiny dataset under `storage/demo/`.
+For a first-time clone, the recommended path is the bundled web-first demo flow.
 
-Set up the environment:
+### 1. Bootstrap the environment
 
 ```bash
 bash scripts/bootstrap_demo.sh
 source .venv/bin/activate
 ```
 
-Run the demo research preset:
+Install qlib if you want to try the qlib workspace:
 
 ```bash
-ashare-backtest run-research-config configs/qlib/demo_strategy.toml
+python -m pip install -e ".[qlib]"
 ```
 
-Start the local web console:
+### 2. Start the local web console
 
 ```bash
 ashare-backtest-web
 ```
 
-Then open `http://127.0.0.1:8888`.
+Open:
 
-What this demo gives you:
+```text
+http://127.0.0.1:8888
+```
 
-- a tracked tiny A-share sample dataset with project parquet data and a small qlib provider
-- runnable native / qlib demo research presets
-- one end-to-end example that generates factors, model scores, and backtest outputs locally
-- generated backtest outputs under `results/demo_backtest`
-- a local web UI for dashboard, backtest artifacts, and simulation views
+### 3. Try both qlib and native workspaces
 
-Before opening `/backtest`, run `ashare-backtest run-research-config configs/qlib/demo_strategy.toml` once so the demo score file is generated locally.
+The repository ships with a tiny dataset under `storage/demo/`, including:
 
-If you want to switch from demo data to your own local dataset later, update `[storage].root` in your config. For qlib workflows, also update `[qlib].provider_uri` and `[qlib].market`. See [real data setup](https://cyecho-io.github.io/ashare-lowfreq-research/real-data/).
+- project parquet data
+- a tiny qlib provider
 
-## Quick Start
+So a first-time user can try both pipelines without a Tushare token or a private market-data setup.
 
-Before running the full workflow on your own data, prepare the local data root first.
+Recommended order:
 
-Recommended preparation order:
+1. Open `/research`
+2. Switch workspace to `qlib` and run `demo strategy`
+3. Open `/backtest` and run a backtest from the generated qlib scores
+4. Switch workspace to `native` and run the native demo config
+5. Open `/backtest` again and inspect the native backtest result
 
-1. Install the project and copy `.env.example` to `.env`
-2. Fill in `TUSHARE_TOKEN`
-3. Create the first version of the local SQLite source database with Tushare sync
-4. Import SQLite into Parquet storage
-5. Run factor build, research, backtest, or the web console
+Default demo outputs are written to:
 
-### Prepare Initial SQLite Market Data
+- `research/qlib/demo/`
+- `research/native/demo/`
+- `results/qlib/demo_backtest/`
+- `results/native/demo_backtest/`
 
-The repository uses a two-layer local data layout:
+CLI users can run:
 
-- `storage/source/`: writable source SQLite database
-- `storage/parquet/`: analysis-friendly Parquet snapshots used by research and backtests
+```bash
+ashare-backtest run-research-config configs/qlib/demo_strategy.toml
+ashare-backtest run-research-config configs/native/demo_strategy.toml
+```
 
-To create the first local SQLite market snapshot, run:
+See the full walkthrough in [Quickstart](https://cyecho-io.github.io/ashare-lowfreq-research/quickstart/).
+
+## Using Real Data
+
+To switch from demo data to your own data, the recommended order is:
+
+1. sync Tushare data into SQLite
+2. import SQLite into parquet storage
+3. update `[storage].root` in your research config
+4. if using qlib, update `[qlib].provider_uri` and `[qlib].market`
+
+### Sync SQLite data
 
 ```bash
 ashare-backtest sync-tushare-sqlite \
@@ -129,15 +150,7 @@ ashare-backtest sync-tushare-sqlite \
   --end 20260331
 ```
 
-This command will:
-
-- create `storage/source/ashare_arena_sync.db` if it does not already exist
-- sync the trading calendar
-- sync stock master data
-- sync daily bars into SQLite
-- refresh the derived `all_active` universe
-
-If you also want benchmark history for web and reporting views, run:
+If you also want benchmark history:
 
 ```bash
 ashare-backtest sync-tushare-benchmark \
@@ -146,136 +159,95 @@ ashare-backtest sync-tushare-benchmark \
   --end 20260331
 ```
 
-### Import SQLite Into Parquet
-
-After SQLite is ready, import it into the Parquet storage layer:
+### Import into parquet storage
 
 ```bash
 ashare-backtest import-sqlite storage/source/ashare_arena_sync.db --storage-root storage
 ```
 
-This generates the standard files expected by the rest of the project under `storage/parquet/` and refreshes `storage/catalog.json`.
-
-### Run The Research Flow
-
-Validate a strategy script:
-
-```bash
-ashare-backtest validate strategies/buy_and_hold.py
-```
-
-Build a factor snapshot from a named universe:
-
-```bash
-ashare-backtest build-factors \
-  --storage-root storage \
-  --universe-name tradable_core \
-  --start-date 2024-02-01 \
-  --as-of-date 2024-12-31
-```
-
-Run a configured research pipeline:
+### Run research and backtest
 
 ```bash
 ashare-backtest run-research-config configs/qlib/research_industry_v4_v1_1_qlib.toml
 ```
 
-Run the tracked demo preset against the bundled tiny dataset:
-
-```bash
-ashare-backtest run-research-config configs/qlib/demo_strategy.toml
-```
-
-Run a backtest from exported model scores:
-
 ```bash
 ashare-backtest run-model-backtest \
-  --scores-path research/models/walk_forward_scores.parquet \
-  --storage-root storage \
-  --start-date 2025-01-01 \
-  --end-date 2025-12-31 \
-  --output-dir results/model_score_backtest
+  --scores-path research/qlib/demo/models/demo_scores.parquet \
+  --storage-root storage/demo \
+  --start-date 2025-01-02 \
+  --end-date 2026-02-27 \
+  --output-dir results/qlib/demo_backtest_manual
 ```
 
-### Start The Web Console
-
-Once `storage/` contains imported data and you have at least one research or backtest run, start the local web console:
-
-```bash
-ashare-backtest-web
-```
-
-The default address is `http://127.0.0.1:8888`.
-
-## Data Sync
-
-Sync daily bars from Tushare into the project source SQLite database:
-
-```bash
-ashare-backtest sync-tushare-sqlite --start 20240101 --end 20260331
-```
-
-Sync benchmark index history into parquet storage:
-
-```bash
-ashare-backtest sync-tushare-benchmark --symbol 000300.SH --start 20240101 --end 20260331
-```
-
-`TUSHARE_TOKEN` is used by default when `--token` is not provided.
+See [Real Data Setup](https://cyecho-io.github.io/ashare-lowfreq-research/real-data/) for the full path.
 
 ## Web Console
 
-Start the local web console:
+Start it with:
 
 ```bash
 ashare-backtest-web
 ```
 
-The console provides:
+The console currently provides four main pages:
 
-- a landing dashboard for trading-calendar and data-source readiness
-- backtest run submission from configured presets
-- result browsing and summary metrics
-- equity curve visualization with optional benchmark overlay
-- trade log inspection
-- simulation-account creation, lineage inspection, and execution history views
+- `/`: dashboard for data readiness, recent runs, and workspace summaries
+- `/research`: research console for editing `configs/**/*.toml` and running full research pipelines
+- `/backtest`: backtest console for selecting score files, date ranges, and result labels
+- `/simulation`: simulation console for account state, execution history, and downstream entry points
 
-## Recommended Research Preset
+All pages share the top-level workspace switcher and automatically scope:
 
-The current recommended preset is centered on [`configs/qlib/research_industry_v4_v1_1_qlib.toml`](/Users/yongqiuwu/works/github/Trade/configs/qlib/research_industry_v4_v1_1_qlib.toml):
+- config candidates
+- research runs
+- score files and lineage
+- backtest result folders
+- simulation outputs
 
-- factor panel: `industry_v4`
-- label: `industry_excess_fwd_return_5`
-- training: monthly walk-forward with a 12-month training window
-- portfolio: `top_k=6`, `rebalance_every=5`, `min_hold_bars=8`, `keep_buffer=2`
-- turnover control: `min_turnover_names=3`
-- industry constraint: `max_names_per_industry=2`
+## Useful CLI Commands
 
-The default tradable universe workflow gates stocks at the `universe` layer before factor construction. After import, the project generates:
+The repository also exposes standalone CLI entry points:
 
-- `all_active`: all currently active stocks
-- `tradable_core`: active, non-ST names listed for at least 120 days, with tradability and liquidity filters applied
+- `ashare-backtest sync-tushare-sqlite`
+- `ashare-backtest sync-tushare-benchmark`
+- `ashare-backtest import-sqlite`
+- `ashare-backtest build-factors`
+- `ashare-backtest run-research-config`
+- `ashare-backtest run-model-backtest`
+- `ashare-backtest qlib-train-walk-forward`
+- `ashare-backtest qlib-train-as-of-date`
+- `ashare-backtest qlib-train-single-date`
 
-## Useful Documents
+If you prefer command-line usage, see the docs page for [CLI Mapping](https://cyecho-io.github.io/ashare-lowfreq-research/cli-reference/).
 
-- [`docs/mvp.md`](/Users/yongqiuwu/works/github/Trade/docs/mvp.md)
-- [`docs/research-pipeline.md`](/Users/yongqiuwu/works/github/Trade/docs/research-pipeline.md)
-- [`docs/strategy-v1-1-premarket-runbook.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v1-1-premarket-runbook.md)
-- [`docs/strategy-v1-1-latest-active-data-source.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v1-1-latest-active-data-source.md)
-- [`docs/strategy-v2-live-readiness-checklist.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-live-readiness-checklist.md)
-- [`docs/strategy-v2-roadmap.md`](/Users/yongqiuwu/works/github/Trade/docs/strategy-v2-roadmap.md)
-- [`CONTRIBUTING.md`](/Users/yongqiuwu/works/github/Trade/CONTRIBUTING.md)
-- [`storage/demo/README.md`](/Users/yongqiuwu/works/github/Trade/storage/demo/README.md)
+## Repository Layout
+
+- `configs/`: runnable research and backtest configs
+- `configs/native/`: native pipeline configs
+- `configs/qlib/`: qlib pipeline configs
+- `docs-site/`: GitHub Pages source files
+- `docs/`: supplementary design and research notes
+- `scripts/`: demo bootstrap and helper scripts
+- `src/ashare_backtest/`: core Python package
+- `src/ashare_backtest/web/`: local web console
+- `storage/`: project parquet data, source SQLite, and demo data
+- `tests/`: regression tests
+
+Generated artifacts usually live under `research/` and `results/` and are meant for local research workflows.
+
+## Related Docs
+
+- [Documentation Home](https://cyecho-io.github.io/ashare-lowfreq-research/)
+- [Quickstart](https://cyecho-io.github.io/ashare-lowfreq-research/quickstart/)
+- [Web Console](https://cyecho-io.github.io/ashare-lowfreq-research/web-console/)
+- [CLI Mapping](https://cyecho-io.github.io/ashare-lowfreq-research/cli-reference/)
+- [Demo Data](https://cyecho-io.github.io/ashare-lowfreq-research/demo-data/)
+- [Real Data Setup](https://cyecho-io.github.io/ashare-lowfreq-research/real-data/)
+- [Qlib Integration](docs/qlib-integration.md)
+- [Demo Data Notes](storage/demo/README.md)
 
 ## Testing
-
-Run the test suite with:
-
-```bash
-python3 -m pytest
-```
-
-Install the package first so `ashare_backtest` is importable:
 
 ```bash
 python -m pip install -e ".[dev]"

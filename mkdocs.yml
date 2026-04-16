@@ -1,5 +1,5 @@
-site_name: A Share Low Frequency Research
-site_description: Web-first guide for demo research, score backtests, and local A-share workflows.
+site_name: A Share Quant Research Workspace
+site_description: Web-first guide for A-share demo research, qlib and native pipelines, score backtests, and local workflows.
 site_url: https://cyecho-io.github.io/ashare-lowfreq-research/
 repo_url: https://github.com/cyecho-io/ashare-lowfreq-research
 repo_name: cyecho-io/ashare-lowfreq-research
