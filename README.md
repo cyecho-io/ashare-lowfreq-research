@@ -8,7 +8,7 @@
 
 ## 核心流程
 
-![项目核心流程](docs/images/exported_image.png)
+![流程](/docs/images/workflow.png)
 
 ## 当前项目能力
 
